@@ -1,0 +1,18 @@
+name: Bump Paper Pin
+on:
+  workflow_dispatch:
+jobs:
+  bump-paper-pin:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: fregante/setup-git-user@v1
+      - name: Update paper submodule to latest on paper
+        run: |
+          git submodule update --init --remote paper
+          git add paper
+          git diff --cached --quiet || git commit -m "bump paper pin"
+      - run: git push origin HEAD
