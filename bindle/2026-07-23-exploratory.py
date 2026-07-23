@@ -48,7 +48,8 @@ def do_watermark(mo, watermark):
 
 @app.cell(hide_code=True)
 def delimit_intro(mo):
-    mo.md("""
+    mo.md(
+        """
     # Single-trial elastic-net GRN run (self-contained, parameterizable)
 
     One trial = one (v, L1 scale, L2 scale, seed, zero-init, blip freq,
@@ -70,15 +71,18 @@ def delimit_intro(mo):
     -- --seed 21 --v 12 --zero-init true --l1-scale 0.9 --l2-scale 0.1
     --blip-freq 0.5 --num-epoch 50000` sets all of them, and the trial runs
     immediately (no button to click).
-    """)
+    """
+    )
     return
 
 
 @app.cell(hide_code=True)
 def delimit_configure_trial(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Configure trial
-    """)
+    """
+    )
     return
 
 
@@ -132,9 +136,11 @@ def show_config(
 
 @app.cell(hide_code=True)
 def delimit_grn_core(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Core GRN model (Kouvaris et al. 2017), inlined from grn.py
-    """)
+    """
+    )
     return
 
 
@@ -208,9 +214,11 @@ def grn_core(njit, np):
 
 @app.cell(hide_code=True)
 def delimit_targets(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Target phenotypes, inlined from targets.py
-    """)
+    """
+    )
     return
 
 
@@ -268,9 +276,11 @@ def targets_definitions(N, np):
 
 @app.cell(hide_code=True)
 def delimit_generalisation(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Generalisation measurement, inlined from generalisation.py
-    """)
+    """
+    )
     return
 
 
@@ -300,9 +310,11 @@ def generalisation_core(MOD_A, np):
 
 @app.cell(hide_code=True)
 def delimit_masked_model(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Masked development + zero-init generalization, inlined from grn_output_masked.py
-    """)
+    """
+    )
     return
 
 
@@ -664,9 +676,11 @@ def masked_model_zero_masked_elastic(
 
 @app.cell(hide_code=True)
 def delimit_model_constants(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Model constants and blip schedule
-    """)
+    """
+    )
     return
 
 
@@ -775,7 +789,8 @@ def show_blip_counts(blip_counts, pd):
 
 @app.cell(hide_code=True)
 def delimit_timepoints(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Timepoint sampling (snapshots + timeseries)
 
     Snapshots (full G/B matrices, persisted to `.npz`) and timeseries rows
@@ -786,7 +801,8 @@ def delimit_timepoints(mo):
     consecutive-block deltas are always available). A domain smaller than
     the requested count degrades gracefully to the full domain rather than
     erroring or duplicating points past what exists.
-    """)
+    """
+    )
     return
 
 
@@ -851,9 +867,11 @@ def show_timepoint_counts(SNAPSHOT_BLOCKS, TIMESERIES_BLOCKS, pd):
 
 @app.cell(hide_code=True)
 def delimit_run_trial(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Run trial
-    """)
+    """
+    )
     return
 
 
@@ -1104,9 +1122,11 @@ def run_trial(
 
 @app.cell(hide_code=True)
 def delimit_show_result(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Result
-    """)
+    """
+    )
     return
 
 
