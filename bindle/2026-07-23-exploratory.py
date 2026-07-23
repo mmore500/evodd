@@ -48,7 +48,8 @@ def do_watermark(mo, watermark):
 
 @app.cell(hide_code=True)
 def delimit_intro(mo):
-    mo.md("""
+    mo.md(
+        """
     # Single-trial elastic-net GRN run (self-contained, parameterizable)
 
     One trial = one (v, L1 scale, L2 scale, seed, zero-init, blip freq,
@@ -70,15 +71,18 @@ def delimit_intro(mo):
     -- --seed 21 --v 12 --zero-init true --l1-scale 0.9 --l2-scale 0.1
     --blip-freq 0.5 --num-epoch 50000` sets all of them, and the trial runs
     immediately (no button to click).
-    """)
+    """
+    )
     return
 
 
 @app.cell(hide_code=True)
 def delimit_configure_trial(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Configure trial
-    """)
+    """
+    )
     return
 
 
@@ -132,9 +136,11 @@ def show_config(
 
 @app.cell(hide_code=True)
 def delimit_grn_core(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Core GRN model (Kouvaris et al. 2017), inlined from grn.py
-    """)
+    """
+    )
     return
 
 
@@ -208,9 +214,11 @@ def grn_core(njit, np):
 
 @app.cell(hide_code=True)
 def delimit_targets(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Target phenotypes, inlined from targets.py
-    """)
+    """
+    )
     return
 
 
@@ -268,9 +276,11 @@ def targets_definitions(N, np):
 
 @app.cell(hide_code=True)
 def delimit_generalisation(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Generalisation measurement, inlined from generalisation.py
-    """)
+    """
+    )
     return
 
 
@@ -300,9 +310,11 @@ def generalisation_core(MOD_A, np):
 
 @app.cell(hide_code=True)
 def delimit_masked_model(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Masked development + zero-init generalization, inlined from grn_output_masked.py
-    """)
+    """
+    )
     return
 
 
@@ -431,7 +443,8 @@ def masked_model_ext_elastic(
         w2,
         visible_mask,
         seed,
-        snap_stride,
+        snapshot_blocks,
+        timeseries_blocks,
         n_score,
     ):
         np.random.seed(seed)
@@ -440,14 +453,33 @@ def masked_model_ext_elastic(
         B = B0.copy()
         n_blocks = schedule.shape[0]
         total_gens = n_blocks * K
-        n_snaps = n_blocks // snap_stride
 
-        G_snap = np.empty((n_snaps + 1, n))
-        B_snap = np.empty((n_snaps + 1, n, n))
-        G_snap[0] = G
-        B_snap[0] = B
-        snap_idx = 1
-        snap_gens = snap_stride * K
+        # snapshot_blocks/timeseries_blocks are sorted-ascending, unique
+        # block indices in [0, n_blocks] -- independent point sets, walked
+        # via monotonic pointers rather than a fixed stride, so recording
+        # cadence can be arbitrarily (non-uniformly) spaced.
+        n_snap_pts = snapshot_blocks.shape[0]
+        n_ts_pts = timeseries_blocks.shape[0]
+        G_snap = np.empty((n_snap_pts, n))
+        B_snap = np.empty((n_snap_pts, n, n))
+        # B_trace holds a B copy at every timeseries point for post-hoc
+        # error computation -- G isn't needed there (compute_errors draws
+        # fresh genotype samples rather than reusing evolved G).
+        B_trace = np.empty((n_ts_pts, n, n))
+        snap_idx = 0
+        ts_idx = 0
+        snap_ptr = 0
+        ts_ptr = 0
+
+        if snap_ptr < n_snap_pts and snapshot_blocks[snap_ptr] == 0:
+            G_snap[snap_idx] = G
+            B_snap[snap_idx] = B
+            snap_idx += 1
+            snap_ptr += 1
+        if ts_ptr < n_ts_pts and timeseries_blocks[ts_ptr] == 0:
+            B_trace[ts_idx] = B
+            ts_idx += 1
+            ts_ptr += 1
 
         for gen in range(total_gens):
             block = gen // K
@@ -465,12 +497,25 @@ def masked_model_ext_elastic(
                 G = Gp
                 B = Bp
 
-            if (gen + 1) % snap_gens == 0:
-                G_snap[snap_idx] = G
-                B_snap[snap_idx] = B
-                snap_idx += 1
+            if (gen + 1) % K == 0:
+                completed_block = (gen + 1) // K
+                if (
+                    snap_ptr < n_snap_pts
+                    and completed_block == snapshot_blocks[snap_ptr]
+                ):
+                    G_snap[snap_idx] = G
+                    B_snap[snap_idx] = B
+                    snap_idx += 1
+                    snap_ptr += 1
+                if (
+                    ts_ptr < n_ts_pts
+                    and completed_block == timeseries_blocks[ts_ptr]
+                ):
+                    B_trace[ts_idx] = B
+                    ts_idx += 1
+                    ts_ptr += 1
 
-        return G, B, G_snap, B_snap
+        return G, B, G_snap, B_snap, B_trace
 
     def compute_errors_output_masked_ext(
         B, visible_mask, seed, n_score, M=100_000
@@ -532,7 +577,8 @@ def masked_model_zero_masked_elastic(
         w2,
         visible_mask,
         seed,
-        snap_stride,
+        snapshot_blocks,
+        timeseries_blocks,
         n_score,
     ):
         np.random.seed(seed)
@@ -541,14 +587,33 @@ def masked_model_zero_masked_elastic(
         B = B0.copy()
         n_blocks = schedule.shape[0]
         total_gens = n_blocks * K
-        n_snaps = n_blocks // snap_stride
 
-        G_snap = np.empty((n_snaps + 1, n))
-        B_snap = np.empty((n_snaps + 1, n, n))
-        G_snap[0] = G
-        B_snap[0] = B
-        snap_idx = 1
-        snap_gens = snap_stride * K
+        # snapshot_blocks/timeseries_blocks are sorted-ascending, unique
+        # block indices in [0, n_blocks] -- independent point sets, walked
+        # via monotonic pointers rather than a fixed stride, so recording
+        # cadence can be arbitrarily (non-uniformly) spaced.
+        n_snap_pts = snapshot_blocks.shape[0]
+        n_ts_pts = timeseries_blocks.shape[0]
+        G_snap = np.empty((n_snap_pts, n))
+        B_snap = np.empty((n_snap_pts, n, n))
+        # B_trace holds a B copy at every timeseries point for post-hoc
+        # error computation -- G isn't needed there (compute_errors draws
+        # fresh genotype samples rather than reusing evolved G).
+        B_trace = np.empty((n_ts_pts, n, n))
+        snap_idx = 0
+        ts_idx = 0
+        snap_ptr = 0
+        ts_ptr = 0
+
+        if snap_ptr < n_snap_pts and snapshot_blocks[snap_ptr] == 0:
+            G_snap[snap_idx] = G
+            B_snap[snap_idx] = B
+            snap_idx += 1
+            snap_ptr += 1
+        if ts_ptr < n_ts_pts and timeseries_blocks[ts_ptr] == 0:
+            B_trace[ts_idx] = B
+            ts_idx += 1
+            ts_ptr += 1
 
         for gen in range(total_gens):
             block = gen // K
@@ -566,12 +631,25 @@ def masked_model_zero_masked_elastic(
                 G = Gp
                 B = Bp
 
-            if (gen + 1) % snap_gens == 0:
-                G_snap[snap_idx] = G
-                B_snap[snap_idx] = B
-                snap_idx += 1
+            if (gen + 1) % K == 0:
+                completed_block = (gen + 1) // K
+                if (
+                    snap_ptr < n_snap_pts
+                    and completed_block == snapshot_blocks[snap_ptr]
+                ):
+                    G_snap[snap_idx] = G
+                    B_snap[snap_idx] = B
+                    snap_idx += 1
+                    snap_ptr += 1
+                if (
+                    ts_ptr < n_ts_pts
+                    and completed_block == timeseries_blocks[ts_ptr]
+                ):
+                    B_trace[ts_idx] = B
+                    ts_idx += 1
+                    ts_ptr += 1
 
-        return G, B, G_snap, B_snap
+        return G, B, G_snap, B_snap, B_trace
 
     def compute_errors_output_masked_zero_masked(
         B, visible_mask, seed, n_score, M=100_000
@@ -598,9 +676,11 @@ def masked_model_zero_masked_elastic(
 
 @app.cell(hide_code=True)
 def delimit_model_constants(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Model constants and blip schedule
-    """)
+    """
+    )
     return
 
 
@@ -630,6 +710,8 @@ def model_constants(np, os):
     N_SCORE = 16
     N_TOTAL = 20
     TOTAL_BLOCKS = 3600
+    N_SNAPSHOT_TARGET = 100
+    N_TIMESERIES_TARGET = 10_000
     OUTPUT_DIR = "dd_trial_outputs"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     # standard 16-gene interleaved order, then the 4 extra hidden genes appended --
@@ -643,6 +725,8 @@ def model_constants(np, os):
         LAM1,
         LAM2,
         N_SCORE,
+        N_SNAPSHOT_TARGET,
+        N_TIMESERIES_TARGET,
         N_TOTAL,
         OUTPUT_DIR,
         TOTAL_BLOCKS,
@@ -704,10 +788,90 @@ def show_blip_counts(blip_counts, pd):
 
 
 @app.cell(hide_code=True)
+def delimit_timepoints(mo):
+    mo.md(
+        """
+    ## Timepoint sampling (snapshots + timeseries)
+
+    Snapshots (full G/B matrices, persisted to `.npz`) and timeseries rows
+    (train/test chi2 + walltime, persisted to `.pqt`) are sampled
+    independently over the block domain `[0, TOTAL_BLOCKS]`: each set is
+    the union of an evenly-spaced and a log-spaced sample at its target
+    count, plus the immediate successor of every sampled point (so
+    consecutive-block deltas are always available). A domain smaller than
+    the requested count degrades gracefully to the full domain rather than
+    erroring or duplicating points past what exists.
+    """
+    )
+    return
+
+
+@app.cell
+def sample_timepoints_fn(np):
+    def sample_timepoints(domain_max, n_target):
+        # Sorted unique block indices in [0, domain_max]: union of an
+        # evenly-spaced and a log-spaced sample (each capped at
+        # min(n_target, domain_max + 1) points -- a domain smaller than
+        # n_target degrades gracefully to (a subset of) the full domain
+        # instead of erroring or padding with out-of-range duplicates),
+        # plus the immediate successor of every sampled point.
+        domain_max = int(domain_max)
+        n = max(1, min(int(n_target), domain_max + 1))
+        even = np.linspace(0, domain_max, n).round().astype(np.int64)
+        if domain_max >= 1 and n >= 2:
+            log = (
+                (np.geomspace(1, domain_max + 1, n) - 1)
+                .round()
+                .astype(np.int64)
+            )
+        else:
+            log = np.zeros(n, dtype=np.int64)
+        union = np.unique(
+            np.clip(
+                np.concatenate([even, log, [0, domain_max]]), 0, domain_max
+            )
+        )
+        with_next = np.unique(
+            np.clip(np.concatenate([union, union + 1]), 0, domain_max)
+        )
+        return with_next.astype(np.int64)
+
+    return (sample_timepoints,)
+
+
+@app.cell
+def build_timepoints(
+    N_SNAPSHOT_TARGET,
+    N_TIMESERIES_TARGET,
+    TOTAL_BLOCKS,
+    sample_timepoints,
+):
+    SNAPSHOT_BLOCKS = sample_timepoints(TOTAL_BLOCKS, N_SNAPSHOT_TARGET)
+    TIMESERIES_BLOCKS = sample_timepoints(TOTAL_BLOCKS, N_TIMESERIES_TARGET)
+    return SNAPSHOT_BLOCKS, TIMESERIES_BLOCKS
+
+
+@app.cell
+def show_timepoint_counts(SNAPSHOT_BLOCKS, TIMESERIES_BLOCKS, pd):
+    timepoint_counts_df = pd.DataFrame(
+        [
+            {
+                "n_snapshot_blocks": len(SNAPSHOT_BLOCKS),
+                "n_timeseries_blocks": len(TIMESERIES_BLOCKS),
+            }
+        ]
+    )
+    timepoint_counts_df
+    return
+
+
+@app.cell(hide_code=True)
 def delimit_run_trial(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Run trial
-    """)
+    """
+    )
     return
 
 
@@ -722,6 +886,8 @@ def run_trial(
     S1b,
     S2b,
     S3b,
+    SNAPSHOT_BLOCKS,
+    TIMESERIES_BLOCKS,
     blip_freq,
     classify_by_phenotype_output_masked,
     classify_exact_counts,
@@ -767,6 +933,7 @@ def run_trial(
             _B,
             _G_snap,
             _B_snap,
+            _B_trace,
         ) = run_sswm_output_masked_scheduled_traced_zero_masked_elastic(
             _G0,
             _B0,
@@ -779,7 +946,8 @@ def run_trial(
             _w2,
             _mask,
             _seed,
-            75,
+            SNAPSHOT_BLOCKS,
+            TIMESERIES_BLOCKS,
             N_SCORE,
         )
 
@@ -794,6 +962,7 @@ def run_trial(
             _B,
             _G_snap,
             _B_snap,
+            _B_trace,
         ) = run_sswm_output_masked_scheduled_traced_ext_elastic(
             _G0,
             _B0,
@@ -806,7 +975,8 @@ def run_trial(
             _w2,
             _mask,
             _seed,
-            75,
+            SNAPSHOT_BLOCKS,
+            TIMESERIES_BLOCKS,
             N_SCORE,
         )
 
@@ -815,20 +985,20 @@ def run_trial(
                 B_, _mask, seed=seed_, n_score=N_SCORE, M=M_
             )
 
-    # the SSWM loop is a single compiled call, so per-snapshot timestamps
+    # the SSWM loop is a single compiled call, so per-timepoint timestamps
     # aren't directly observable -- _sswm_wall is the true measured duration
     # of the whole call, and each row's walltime below is interpolated
     # proportional to how far through the generation count that row sits
     # (a reasonable estimate since SSWM's cost is ~constant per generation).
     _sswm_wall = time.time() - _t_evo_start
 
-    _n_snaps = _B_snap.shape[0]
-    trace_gens = [i * 75 * _K for i in range(_n_snaps)]
+    _n_ts = _B_trace.shape[0]
+    trace_gens = [int(_b) * _K for _b in TIMESERIES_BLOCKS]
     _total_gens = trace_gens[-1] if trace_gens[-1] > 0 else 1
     trace_walltime = [_sswm_wall * (g / _total_gens) for g in trace_gens]
     trace_train, trace_test = [], []
-    for _i in range(_n_snaps):
-        _tr, _te, _ = _errors_fn(_B_snap[_i], _seed + 2000, 2000)
+    for _i in range(_n_ts):
+        _tr, _te, _ = _errors_fn(_B_trace[_i], _seed + 2000, 2000)
         trace_train.append(_tr)
         trace_test.append(_te)
 
@@ -909,12 +1079,15 @@ def run_trial(
 
     # --- write G_snap and B_snap to separate npz key-value stores, each
     # keyed by generation (zero-padded so keys sort lexicographically in
-    # the same order as chronologically).
+    # the same order as chronologically). Snapshot points are the sparser
+    # SNAPSHOT_BLOCKS set, distinct from the denser TIMESERIES_BLOCKS set
+    # trace_gens is built from above.
+    _snapshot_gens = [int(_b) * _K for _b in SNAPSHOT_BLOCKS]
     _G_store = {
-        f"gen{_g:012d}": _G_snap[_i] for _i, _g in enumerate(trace_gens)
+        f"gen{_g:012d}": _G_snap[_i] for _i, _g in enumerate(_snapshot_gens)
     }
     _B_store = {
-        f"gen{_g:012d}": _B_snap[_i] for _i, _g in enumerate(trace_gens)
+        f"gen{_g:012d}": _B_snap[_i] for _i, _g in enumerate(_snapshot_gens)
     }
     G_snapshots_path = (
         f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'what': 'G', 'ext': '.npz'})}"
@@ -949,9 +1122,11 @@ def run_trial(
 
 @app.cell(hide_code=True)
 def delimit_show_result(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Result
-    """)
+    """
+    )
     return
 
 
