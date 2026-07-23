@@ -22,7 +22,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # TEST VARIANT of slurm/2026-07-23/2026-07-23-exploratory-sweep.sh: IDENTICAL
 # sweep definitions, index decomposition, and CHUNK=3 packing as the full
 # production script -- the only difference is the #SBATCH --array line
-# below, which submits 10 explicit array TASK indices (ARRAY_INDICES)
+# below, which submits 12 explicit array TASK indices (ARRAY_INDICES)
 # instead of the full 0-983 range.
 #
 # Production already packs each array task's CHUNK=3 concurrent replicates
@@ -38,25 +38,29 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # keyed by its own global index, so same-job concurrency is exactly as
 # isolated as cross-job concurrency).
 #
-# The 10 selected task indices were picked (via the SAME decomposition
+# The 12 selected task indices were picked (via the SAME decomposition
 # used in production) to land on v in {0, 4, 8, 12, 16, 20}, one CHUNK=3
-# triple (i.e. one replicate under each of none/local/global) each;
-# blip_freq/l1-l2-mix/seed are whatever the decomposition naturally
-# assigns at that task (arbitrary, per request -- not swept here). 10
-# tasks * 3 replicates = 30 replicates total:
+# triple (i.e. one replicate under each of none/local/global) each, under
+# BOTH zero_init True and False; blip_freq/l1-l2-mix/seed are whatever
+# the decomposition naturally assigns at that task (arbitrary, per
+# request -- not swept here). 12 tasks * 3 replicates = 36 replicates
+# total:
 #   TASK_ID= 0 -> gid  0.. 2 -> v=0  zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
 #   TASK_ID= 1 -> gid  3.. 5 -> v=0  zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
 #   TASK_ID=26 -> gid 78..80 -> v=4  zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=27 -> gid 81..83 -> v=4  zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
 #   TASK_ID=30 -> gid 90..92 -> v=8  zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
 #   TASK_ID=31 -> gid 93..95 -> v=8  zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
 #   TASK_ID=34 -> gid102..104-> v=12 zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=35 -> gid105..107-> v=12 zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
 #   TASK_ID=38 -> gid114..116-> v=16 zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
 #   TASK_ID=39 -> gid117..119-> v=16 zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
 #   TASK_ID=42 -> gid126..128-> v=20 zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
 #   TASK_ID=43 -> gid129..131-> v=20 zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
 # each task's 3-gid range covers schedule_mode = none, local, global (in
-# that order). v=4 and v=12 (zero_init=True only) are the two added task
-# indices, broadening coverage beyond the original v in {0, 8, 16, 20}.
+# that order). v=4 and v=12, under both zero_init values, are the four
+# added task indices, broadening coverage beyond the original v in
+# {0, 8, 16, 20}.
 #
 # Sweep: the single-trial elastic-net GRN notebook (v1..v20 double-descent
 # model) across:
@@ -145,7 +149,7 @@ NUM_EPOCH=138889
 # explicit array TASK indices to submit (see banner above for what each
 # decodes to -- each covers a CHUNK=3 triple, i.e. all 3 schedule_mode
 # values, for one (blip_freq, mix, zero_init, v, seed) condition)
-ARRAY_INDICES="0,1,26,30,31,34,38,39,42,43"
+ARRAY_INDICES="0,1,26,27,30,31,34,35,38,39,42,43"
 echo "N_BLIP=${N_BLIP} BLIP_FREQS=${BLIP_FREQS[*]}"
 echo "N_MIX=${N_MIX} L1_SCALES=${L1_SCALES[*]} L2_SCALES=${L2_SCALES[*]}"
 echo "N_ZERO=${N_ZERO} ZERO_INITS=${ZERO_INITS[*]}"
@@ -153,7 +157,7 @@ echo "N_SCHEDULE=${N_SCHEDULE} SCHEDULE_MODES=${SCHEDULE_MODES[*]}"
 echo "N_V0_SEED=${N_V0_SEED} V0_SEEDS=${V0_SEEDS[*]} (v=0 replicate count)"
 echo "N_REST_SEED=${N_REST_SEED} REST_SEEDS=${REST_SEEDS[*]} N_V_REST=${N_V_REST} V_REST=${V_REST[*]}"
 echo "N_TASKS_V0=${N_TASKS_V0} N_TASKS_REST=${N_TASKS_REST} N_TASKS=${N_TASKS} CHUNK=${CHUNK} N_ARRAY_TASKS=${N_ARRAY_TASKS}"
-echo "ARRAY_INDICES=${ARRAY_INDICES} (only these 10 of ${N_ARRAY_TASKS} array indices are actually submitted; 10*3=30 replicates)"
+echo "ARRAY_INDICES=${ARRAY_INDICES} (only these 12 of ${N_ARRAY_TASKS} array indices are actually submitted; 12*3=36 replicates)"
 echo "NUM_EPOCH=${NUM_EPOCH} (total generations per replicate = 3600 * NUM_EPOCH = $((3600 * NUM_EPOCH)))"
 
 SOURCE_REVISION="$(git rev-parse HEAD)"
