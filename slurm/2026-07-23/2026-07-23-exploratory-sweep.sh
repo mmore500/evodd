@@ -22,12 +22,15 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # Sweep: the single-trial elastic-net GRN notebook (v1..v20 double-descent
 # model) across:
 #   - blip_freq  in {0.66, 0.63, 0.6, 0.5}                          (4)
-#   - seed       in {1, 2, 3, 4}                                    (4 replicate seeds)
 #   - (l1_scale, l2_scale) in {(1.0, 0.0), (0.995, 0.005), (0.9933, 0.0067)}
 #     i.e. pure-L1, the notebook's default mix, and a near-pure-L1 mix (3)
-#   - v          in {0}  (visible-gene count, v0 only)               (1)
 #   - zero_init  in {True, False}                                   (2)
-# 4 * 4 * 3 * 1 * 2 = 96 replicates.
+# crossed with an UNEVEN v/seed split (v=0 gets fewer replicates than the
+# rest, so this isn't one uniform Cartesian product):
+#   - v = 0                      -> 1 replicate  (seed 1 only)       (1 v x 1 seed)
+#   - v in {2, 4, ..., 20} (even, excluding 0) -> 4 replicates each
+#     (seeds 1..4)                                                   (10 v x 4 seed)
+# total = 4 * 3 * 2 * (1*1 + 10*4) = 4 * 3 * 2 * 41 = 984 replicates.
 #
 # Generations vs. epochs: the notebook's SSWM loop runs
 # TOTAL_BLOCKS (fixed at 3600 inside the notebook, not CLI-configurable)
@@ -42,14 +45,21 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # The cluster caps a job array at 1000 queued tasks, so we pack CHUNK=4
 # replicates into each array task and run those 4 *concurrently* (one CPU
 # each, see --cpus-per-task below) rather than sequentially --- this
-# divides 96 replicates evenly into 96 / 4 = 24 array tasks, keeping
+# divides 984 replicates evenly into 984 / 4 = 246 array tasks, keeping
 # per-task walltime ~1x a single replicate.
 #
-# Global replicate index r in [0, N_TASKS) decomposes fastest-varying
-# first: zero_idx = r % N_ZERO; v_idx = (r / N_ZERO) % N_V;
-# mix_idx = (r / N_ZERO / N_V) % N_MIX;
-# seed_idx = (r / N_ZERO / N_V / N_MIX) % N_SEED;
-# blip_idx = r / N_ZERO / N_V / N_MIX / N_SEED.
+# Global replicate index r in [0, N_TASKS) is split into two contiguous
+# blocks rather than one uniform Cartesian product, since v=0 and the
+# rest of the v values don't share the same seed count:
+#   - r < N_TASKS_V0: the v=0 block (single seed). Decomposes
+#     fastest-varying first: zero_idx = r % N_ZERO;
+#     mix_idx = (r / N_ZERO) % N_MIX; blip_idx = r / N_ZERO / N_MIX.
+#   - r >= N_TASKS_V0: the "rest" block (v in {2,4,...,20}, 4 seeds
+#     each), re-based to r' = r - N_TASKS_V0 and decomposed
+#     fastest-varying first: zero_idx = r' % N_ZERO;
+#     v_idx = (r' / N_ZERO) % N_V_REST;
+#     mix_idx = (r' / N_ZERO / N_V_REST) % N_MIX;
+#     seed_idx = r' / N_ZERO / N_V_REST / N_MIX.
 # Array task t owns the CHUNK consecutive indices r = t * CHUNK + j for j
 # in [0, CHUNK) (each launched as a background job).
 #
@@ -58,26 +68,30 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # takes ~100 minutes -- comfortably inside the 4-hour job time limit below
 # even allowing for slower cluster CPUs.
 BLIP_FREQS=(0.66 0.63 0.6 0.5)
-SEEDS=(1 2 3 4)
 L1_SCALES=(1.0 0.995 0.9933)
 L2_SCALES=(0.0 0.005 0.0067)
-V_LABELS=(0)
 ZERO_INITS=(True False)
+V0_SEEDS=(1)
+REST_SEEDS=(1 2 3 4)
+V_REST=(2 4 6 8 10 12 14 16 18 20)
 N_BLIP=${#BLIP_FREQS[@]}
-N_SEED=${#SEEDS[@]}
 N_MIX=${#L1_SCALES[@]}
-N_V=${#V_LABELS[@]}
 N_ZERO=${#ZERO_INITS[@]}
-N_TASKS=$((N_BLIP * N_SEED * N_MIX * N_V * N_ZERO))
+N_V0_SEED=${#V0_SEEDS[@]}
+N_REST_SEED=${#REST_SEEDS[@]}
+N_V_REST=${#V_REST[@]}
+N_TASKS_V0=$((N_BLIP * N_MIX * N_ZERO * N_V0_SEED))
+N_TASKS_REST=$((N_BLIP * N_MIX * N_ZERO * N_REST_SEED * N_V_REST))
+N_TASKS=$((N_TASKS_V0 + N_TASKS_REST))
 CHUNK=4
 N_ARRAY_TASKS=$(((N_TASKS + CHUNK - 1) / CHUNK))
 NUM_EPOCH=138889
 echo "N_BLIP=${N_BLIP} BLIP_FREQS=${BLIP_FREQS[*]}"
-echo "N_SEED=${N_SEED} SEEDS=${SEEDS[*]}"
 echo "N_MIX=${N_MIX} L1_SCALES=${L1_SCALES[*]} L2_SCALES=${L2_SCALES[*]}"
-echo "N_V=${N_V} V_LABELS=${V_LABELS[*]}"
 echo "N_ZERO=${N_ZERO} ZERO_INITS=${ZERO_INITS[*]}"
-echo "N_TASKS=${N_TASKS} CHUNK=${CHUNK} N_ARRAY_TASKS=${N_ARRAY_TASKS}"
+echo "N_V0_SEED=${N_V0_SEED} V0_SEEDS=${V0_SEEDS[*]} (v=0 replicate count)"
+echo "N_REST_SEED=${N_REST_SEED} REST_SEEDS=${REST_SEEDS[*]} N_V_REST=${N_V_REST} V_REST=${V_REST[*]}"
+echo "N_TASKS_V0=${N_TASKS_V0} N_TASKS_REST=${N_TASKS_REST} N_TASKS=${N_TASKS} CHUNK=${CHUNK} N_ARRAY_TASKS=${N_ARRAY_TASKS}"
 echo "NUM_EPOCH=${NUM_EPOCH} (total generations per replicate = 3600 * NUM_EPOCH = $((3600 * NUM_EPOCH)))"
 
 SOURCE_REVISION="$(git rev-parse HEAD)"
@@ -277,11 +291,12 @@ cat "${BATCHDIR_JOBSOURCE}/${NOTEBOOK_PATH}" || :
 
 echo "task assignment --------------------------------------------- \${SECONDS}"
 BLIP_FREQS=(${BLIP_FREQS[*]})
-SEEDS=(${SEEDS[*]})
 L1_SCALES=(${L1_SCALES[*]})
 L2_SCALES=(${L2_SCALES[*]})
-V_LABELS=(${V_LABELS[*]})
 ZERO_INITS=(${ZERO_INITS[*]})
+V0_SEEDS=(${V0_SEEDS[*]})
+REST_SEEDS=(${REST_SEEDS[*]})
+V_REST=(${V_REST[*]})
 TASK_ID=\${SLURM_ARRAY_TASK_ID:-0}
 echo "TASK_ID=\${TASK_ID} CHUNK=${CHUNK}"
 echo "owns global replicate indices \$((TASK_ID * ${CHUNK})) .. \$((TASK_ID * ${CHUNK} + ${CHUNK} - 1))"
@@ -302,20 +317,35 @@ export NUMEXPR_NUM_THREADS=1
 # timeseries row.
 run_replicate() {
     local gid="\$1"
-    local zero_idx=\$((gid % ${N_ZERO}))
-    local rem1=\$((gid / ${N_ZERO}))
-    local v_idx=\$((rem1 % ${N_V}))
-    local rem2=\$((rem1 / ${N_V}))
-    local mix_idx=\$((rem2 % ${N_MIX}))
-    local rem3=\$((rem2 / ${N_MIX}))
-    local seed_idx=\$((rem3 % ${N_SEED}))
-    local blip_idx=\$((rem3 / ${N_SEED}))
+    local v seed
+
+    if [ "\${gid}" -lt "${N_TASKS_V0}" ]; then
+        # v=0 block: single seed, so no v/seed indexing needed.
+        local zero_idx=\$((gid % ${N_ZERO}))
+        local rem1=\$((gid / ${N_ZERO}))
+        local mix_idx=\$((rem1 % ${N_MIX}))
+        local rem2=\$((rem1 / ${N_MIX}))
+        local blip_idx=\$((rem2 % ${N_BLIP}))
+        v=0
+        seed="\${V0_SEEDS[0]}"
+    else
+        # "rest" block (v in {2,4,...,20}), re-based to start at 0.
+        local rgid=\$((gid - ${N_TASKS_V0}))
+        local zero_idx=\$((rgid % ${N_ZERO}))
+        local rem1=\$((rgid / ${N_ZERO}))
+        local v_idx=\$((rem1 % ${N_V_REST}))
+        local rem2=\$((rem1 / ${N_V_REST}))
+        local mix_idx=\$((rem2 % ${N_MIX}))
+        local rem3=\$((rem2 / ${N_MIX}))
+        local seed_idx=\$((rem3 % ${N_REST_SEED}))
+        local blip_idx=\$((rem3 / ${N_REST_SEED}))
+        v="\${V_REST[\${v_idx}]}"
+        seed="\${REST_SEEDS[\${seed_idx}]}"
+    fi
 
     local blip="\${BLIP_FREQS[\${blip_idx}]}"
-    local seed="\${SEEDS[\${seed_idx}]}"
     local l1="\${L1_SCALES[\${mix_idx}]}"
     local l2="\${L2_SCALES[\${mix_idx}]}"
-    local v="\${V_LABELS[\${v_idx}]}"
     local zeroinit="\${ZERO_INITS[\${zero_idx}]}"
     local repdir="\${JOBDIR}/r\${gid}"
     mkdir -p "\${repdir}"
