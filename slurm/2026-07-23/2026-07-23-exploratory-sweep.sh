@@ -42,10 +42,10 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # of 3600 * 138889 = 500,000,400 generations per replicate (400 over the
 # round-number target -- 3600 does not divide 500e6 evenly).
 #
-# The cluster caps a job array at 1000 queued tasks, so we pack CHUNK=4
-# replicates into each array task and run those 4 *concurrently* (one CPU
+# The cluster caps a job array at 1000 queued tasks, so we pack CHUNK=3
+# replicates into each array task and run those 3 *concurrently* (one CPU
 # each, see --cpus-per-task below) rather than sequentially --- this
-# divides 984 replicates evenly into 984 / 4 = 246 array tasks, keeping
+# divides 984 replicates evenly into 984 / 3 = 328 array tasks, keeping
 # per-task walltime ~1x a single replicate.
 #
 # Global replicate index r in [0, N_TASKS) is split into two contiguous
@@ -83,7 +83,7 @@ N_V_REST=${#V_REST[@]}
 N_TASKS_V0=$((N_BLIP * N_MIX * N_ZERO * N_V0_SEED))
 N_TASKS_REST=$((N_BLIP * N_MIX * N_ZERO * N_REST_SEED * N_V_REST))
 N_TASKS=$((N_TASKS_V0 + N_TASKS_REST))
-CHUNK=4
+CHUNK=3
 N_ARRAY_TASKS=$(((N_TASKS + CHUNK - 1) / CHUNK))
 NUM_EPOCH=138889
 echo "N_BLIP=${N_BLIP} BLIP_FREQS=${BLIP_FREQS[*]}"
