@@ -4,6 +4,7 @@ Deprecated==1.2.13
 interval_search==0.5.2
 IPython==7.31.1
 isort==5.12.0
+keyname==0.6.0
 marimo==0.23.2
 matplotlib==3.9.2
 more_itertools==9.1.0
@@ -11,6 +12,7 @@ nb-clean==2.4.0
 nbqa==1.9.1
 nbconvert==7.6.0
 nbmetalog==0.2.6
+numba==0.66.0
 numpy==2.1.2
 opytional==0.1.0
 pandas==2.2.3
