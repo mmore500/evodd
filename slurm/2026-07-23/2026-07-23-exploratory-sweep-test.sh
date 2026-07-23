@@ -19,38 +19,64 @@ echo "NOTEBOOK_NAME ${NOTEBOOK_NAME}"
 NOTEBOOK_PATH="bindle/${NOTEBOOK_NAME}.py"
 echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 
-# TEST VARIANT of slurm/2026-07-23/2026-07-23-exploratory-sweep.sh: same
-# sweep definitions and the same global-index decomposition as the full
-# production script (so CHUNK=1 here, keeping N_ARRAY_TASKS=984 == array
-# index == global replicate index, one-to-one, unlike production's
-# CHUNK=4 packing) -- but only submits 8 explicit array indices (see
-# ARRAY_INDICES below and the #SBATCH --array line) rather than the full
-# 0-983 range. Those 8 indices were picked (via the SAME decomposition
-# used in production) to land on v in {0, 8, 16, 20}, one replicate each
-# under zero_init True and False (8 combos total); blip_freq/l1-l2-mix/
-# seed are whatever the decomposition naturally assigns at that index
-# (arbitrary, per request -- not swept here):
-#   gid= 0 -> v=0  zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
-#   gid= 1 -> v=0  zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
-#   gid=30 -> v=8  zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
-#   gid=31 -> v=8  zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
-#   gid=38 -> v=16 zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
-#   gid=39 -> v=16 zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
-#   gid=42 -> v=20 zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
-#   gid=43 -> v=20 zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
+# TEST VARIANT of slurm/2026-07-23/2026-07-23-exploratory-sweep.sh: IDENTICAL
+# sweep definitions, index decomposition, and CHUNK=3 packing as the full
+# production script -- the only difference is the #SBATCH --array line
+# below, which submits 12 explicit array TASK indices (ARRAY_INDICES)
+# instead of the full 0-983 range.
+#
+# Production already packs each array task's CHUNK=3 concurrent replicates
+# as the SAME (blip_freq, l1/l2 mix, zero_init, v, seed) condition run
+# under all 3 schedule_mode values side by side (schedule_idx is the
+# fastest-varying index, exactly matching CHUNK) -- there is no way for a
+# single array task to run fewer than all 3 schedule_mode values, since
+# CHUNK=3 always spans one full none/local/global triple. So every task
+# index below independently (not just once, collectively) exercises all
+# 3 modes -- this test doubles as a check that concurrently running all 3
+# modes on the 3 CPUs of one job doesn't clobber each other's output
+# files (each replicate writes to its own ${JOBDIR}/r<gid>/dd_trial_outputs/,
+# keyed by its own global index, so same-job concurrency is exactly as
+# isolated as cross-job concurrency).
+#
+# The 12 selected task indices were picked (via the SAME decomposition
+# used in production) to land on v in {0, 4, 8, 12, 16, 20}, one CHUNK=3
+# triple (i.e. one replicate under each of none/local/global) each, under
+# BOTH zero_init True and False; blip_freq/l1-l2-mix/seed are whatever
+# the decomposition naturally assigns at that task (arbitrary, per
+# request -- not swept here). 12 tasks * 3 replicates = 36 replicates
+# total:
+#   TASK_ID= 0 -> gid  0.. 2 -> v=0  zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID= 1 -> gid  3.. 5 -> v=0  zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=26 -> gid 78..80 -> v=4  zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=27 -> gid 81..83 -> v=4  zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=30 -> gid 90..92 -> v=8  zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=31 -> gid 93..95 -> v=8  zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=34 -> gid102..104-> v=12 zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=35 -> gid105..107-> v=12 zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=38 -> gid114..116-> v=16 zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=39 -> gid117..119-> v=16 zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=42 -> gid126..128-> v=20 zero_init=True   (blip=0.66 l1/l2=1.0/0.0 seed=1)
+#   TASK_ID=43 -> gid129..131-> v=20 zero_init=False  (blip=0.66 l1/l2=1.0/0.0 seed=1)
+# each task's 3-gid range covers schedule_mode = none, local, global (in
+# that order). v=4 and v=12, under both zero_init values, are the four
+# added task indices, broadening coverage beyond the original v in
+# {0, 8, 16, 20}.
 #
 # Sweep: the single-trial elastic-net GRN notebook (v1..v20 double-descent
 # model) across:
-#   - blip_freq  in {0.66, 0.63, 0.6, 0.5}                          (4)
+#   - blip_freq     in {0.66, 0.63, 0.6, 0.5}                       (4)
 #   - (l1_scale, l2_scale) in {(1.0, 0.0), (0.995, 0.005), (0.9933, 0.0067)}
 #     i.e. pure-L1, the notebook's default mix, and a near-pure-L1 mix (3)
-#   - zero_init  in {True, False}                                   (2)
+#   - zero_init     in {True, False}                                (2)
+#   - schedule_mode in {none, local, global}                        (3)
+#     controls how ties are broken in the environment-presentation
+#     schedule (the notebook's --schedule-mode flag).
 # crossed with an UNEVEN v/seed split (v=0 gets fewer replicates than the
 # rest, so this isn't one uniform Cartesian product):
 #   - v = 0                      -> 1 replicate  (seed 1 only)       (1 v x 1 seed)
 #   - v in {2, 4, ..., 20} (even, excluding 0) -> 4 replicates each
 #     (seeds 1..4)                                                   (10 v x 4 seed)
-# total = 4 * 3 * 2 * (1*1 + 10*4) = 4 * 3 * 2 * 41 = 984 replicates.
+# total = 4 * 3 * 2 * 3 * (1*1 + 10*4) = 4 * 3 * 2 * 3 * 41 = 2952 replicates.
 #
 # Generations vs. epochs: the notebook's SSWM loop runs
 # TOTAL_BLOCKS (fixed at 3600 inside the notebook, not CLI-configurable)
@@ -62,25 +88,38 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # of 3600 * 138889 = 500,000,400 generations per replicate (400 over the
 # round-number target -- 3600 does not divide 500e6 evenly).
 #
-# CHUNK=1 here (unlike production's CHUNK=4) so that array index and
-# global replicate index coincide 1:1, making it possible to hand-pick
-# array indices for specific (v, zero_init) combos.
+# The cluster caps a job array at 1000 queued tasks, so we pack CHUNK=3
+# replicates into each array task and run those 3 *concurrently* (one CPU
+# each, see --cpus-per-task below) rather than sequentially. schedule_mode
+# is deliberately the FASTEST-varying (innermost) dimension in the index
+# decomposition below, exactly matching CHUNK=3, so each array task's 3
+# concurrent replicates are the SAME (blip_freq, l1/l2 mix, zero_init, v,
+# seed) condition run under all 3 schedule_mode values side by side --
+# this divides 2952 replicates evenly into 2952 / 3 = 984 array tasks
+# (only 8 of which are actually submitted here, see ARRAY_INDICES).
 #
 # Global replicate index r in [0, N_TASKS) is split into two contiguous
 # blocks rather than one uniform Cartesian product, since v=0 and the
-# rest of the v values don't share the same seed count:
-#   - r < N_TASKS_V0: the v=0 block (single seed). Decomposes
-#     fastest-varying first: zero_idx = r % N_ZERO;
-#     mix_idx = (r / N_ZERO) % N_MIX; blip_idx = r / N_ZERO / N_MIX.
+# rest of the v values don't share the same seed count. Both blocks
+# decompose fastest-varying first, starting with schedule_idx so it
+# aligns with CHUNK:
+#   - r < N_TASKS_V0: the v=0 block (single seed).
+#     schedule_idx = r % N_SCHEDULE;
+#     zero_idx = (r / N_SCHEDULE) % N_ZERO;
+#     mix_idx = (r / N_SCHEDULE / N_ZERO) % N_MIX;
+#     blip_idx = r / N_SCHEDULE / N_ZERO / N_MIX.
 #   - r >= N_TASKS_V0: the "rest" block (v in {2,4,...,20}, 4 seeds
-#     each), re-based to r' = r - N_TASKS_V0 and decomposed
-#     fastest-varying first: zero_idx = r' % N_ZERO;
-#     v_idx = (r' / N_ZERO) % N_V_REST;
-#     mix_idx = (r' / N_ZERO / N_V_REST) % N_MIX;
-#     seed_idx = r' / N_ZERO / N_V_REST / N_MIX.
-# Array task t owns the CHUNK consecutive indices r = t * CHUNK + j for j
-# in [0, CHUNK) (each launched as a background job) -- with CHUNK=1 that's
-# just r = t.
+#     each), re-based to r' = r - N_TASKS_V0.
+#     schedule_idx = r' % N_SCHEDULE;
+#     zero_idx = (r' / N_SCHEDULE) % N_ZERO;
+#     v_idx = (r' / N_SCHEDULE / N_ZERO) % N_V_REST;
+#     mix_idx = (r' / N_SCHEDULE / N_ZERO / N_V_REST) % N_MIX;
+#     seed_idx = (r' / N_SCHEDULE / N_ZERO / N_V_REST / N_MIX) % N_REST_SEED;
+#     blip_idx = r' / N_SCHEDULE / N_ZERO / N_V_REST / N_MIX / N_REST_SEED.
+# N_TASKS_V0 (72) is itself a multiple of CHUNK=3, so no CHUNK-triple
+# straddles the v0/rest block boundary. Array task t owns the CHUNK
+# consecutive indices r = t * CHUNK + j for j in [0, CHUNK) (each
+# launched as a background job).
 #
 # Benchmarked the notebook's core SSWM loop single-threaded (non-cluster
 # hardware) at ~83,000 generations/sec, so one 500M-generation replicate
@@ -90,30 +129,35 @@ BLIP_FREQS=(0.66 0.63 0.6 0.5)
 L1_SCALES=(1.0 0.995 0.9933)
 L2_SCALES=(0.0 0.005 0.0067)
 ZERO_INITS=(True False)
+SCHEDULE_MODES=(none local global)
 V0_SEEDS=(1)
 REST_SEEDS=(1 2 3 4)
 V_REST=(2 4 6 8 10 12 14 16 18 20)
 N_BLIP=${#BLIP_FREQS[@]}
 N_MIX=${#L1_SCALES[@]}
 N_ZERO=${#ZERO_INITS[@]}
+N_SCHEDULE=${#SCHEDULE_MODES[@]}
 N_V0_SEED=${#V0_SEEDS[@]}
 N_REST_SEED=${#REST_SEEDS[@]}
 N_V_REST=${#V_REST[@]}
-N_TASKS_V0=$((N_BLIP * N_MIX * N_ZERO * N_V0_SEED))
-N_TASKS_REST=$((N_BLIP * N_MIX * N_ZERO * N_REST_SEED * N_V_REST))
+N_TASKS_V0=$((N_BLIP * N_MIX * N_ZERO * N_SCHEDULE * N_V0_SEED))
+N_TASKS_REST=$((N_BLIP * N_MIX * N_ZERO * N_SCHEDULE * N_REST_SEED * N_V_REST))
 N_TASKS=$((N_TASKS_V0 + N_TASKS_REST))
-CHUNK=1
+CHUNK=3
 N_ARRAY_TASKS=$(((N_TASKS + CHUNK - 1) / CHUNK))
 NUM_EPOCH=138889
-# explicit array indices to submit (see banner above for what each decodes to)
-ARRAY_INDICES="0,1,30,31,38,39,42,43"
+# explicit array TASK indices to submit (see banner above for what each
+# decodes to -- each covers a CHUNK=3 triple, i.e. all 3 schedule_mode
+# values, for one (blip_freq, mix, zero_init, v, seed) condition)
+ARRAY_INDICES="0,1,26,27,30,31,34,35,38,39,42,43"
 echo "N_BLIP=${N_BLIP} BLIP_FREQS=${BLIP_FREQS[*]}"
 echo "N_MIX=${N_MIX} L1_SCALES=${L1_SCALES[*]} L2_SCALES=${L2_SCALES[*]}"
 echo "N_ZERO=${N_ZERO} ZERO_INITS=${ZERO_INITS[*]}"
+echo "N_SCHEDULE=${N_SCHEDULE} SCHEDULE_MODES=${SCHEDULE_MODES[*]}"
 echo "N_V0_SEED=${N_V0_SEED} V0_SEEDS=${V0_SEEDS[*]} (v=0 replicate count)"
 echo "N_REST_SEED=${N_REST_SEED} REST_SEEDS=${REST_SEEDS[*]} N_V_REST=${N_V_REST} V_REST=${V_REST[*]}"
 echo "N_TASKS_V0=${N_TASKS_V0} N_TASKS_REST=${N_TASKS_REST} N_TASKS=${N_TASKS} CHUNK=${CHUNK} N_ARRAY_TASKS=${N_ARRAY_TASKS}"
-echo "ARRAY_INDICES=${ARRAY_INDICES} (only these 8 of ${N_ARRAY_TASKS} array indices are actually submitted)"
+echo "ARRAY_INDICES=${ARRAY_INDICES} (only these 12 of ${N_ARRAY_TASKS} array indices are actually submitted; 12*3=36 replicates)"
 echo "NUM_EPOCH=${NUM_EPOCH} (total generations per replicate = 3600 * NUM_EPOCH = $((3600 * NUM_EPOCH)))"
 
 SOURCE_REVISION="$(git rev-parse HEAD)"
@@ -316,6 +360,7 @@ BLIP_FREQS=(${BLIP_FREQS[*]})
 L1_SCALES=(${L1_SCALES[*]})
 L2_SCALES=(${L2_SCALES[*]})
 ZERO_INITS=(${ZERO_INITS[*]})
+SCHEDULE_MODES=(${SCHEDULE_MODES[*]})
 V0_SEEDS=(${V0_SEEDS[*]})
 REST_SEEDS=(${REST_SEEDS[*]})
 V_REST=(${V_REST[*]})
@@ -331,36 +376,40 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-# Run one (blip_freq, seed, l1/l2 mix, v, zero_init) trial on CPU. Each
-# replicate runs in its own working dir \${JOBDIR}/r<gid> and the notebook
-# writes one timeseries parquet plus G/B snapshot npz stores to that dir's
-# dd_trial_outputs/, self-describing via keyname (every run option as a
-# key=value segment) with a uuid replicate identifier stamped on every
-# timeseries row.
+# Run one (blip_freq, seed, l1/l2 mix, v, zero_init, schedule_mode) trial
+# on CPU. Each replicate runs in its own working dir \${JOBDIR}/r<gid> and
+# the notebook writes one timeseries parquet plus G/B snapshot npz stores
+# to that dir's dd_trial_outputs/, self-describing via keyname (every run
+# option as a key=value segment) with a uuid replicate identifier
+# stamped on every timeseries row.
 run_replicate() {
     local gid="\$1"
     local v seed
 
     if [ "\${gid}" -lt "${N_TASKS_V0}" ]; then
         # v=0 block: single seed, so no v/seed indexing needed.
-        local zero_idx=\$((gid % ${N_ZERO}))
-        local rem1=\$((gid / ${N_ZERO}))
-        local mix_idx=\$((rem1 % ${N_MIX}))
-        local rem2=\$((rem1 / ${N_MIX}))
-        local blip_idx=\$((rem2 % ${N_BLIP}))
+        local schedule_idx=\$((gid % ${N_SCHEDULE}))
+        local rem1=\$((gid / ${N_SCHEDULE}))
+        local zero_idx=\$((rem1 % ${N_ZERO}))
+        local rem2=\$((rem1 / ${N_ZERO}))
+        local mix_idx=\$((rem2 % ${N_MIX}))
+        local rem3=\$((rem2 / ${N_MIX}))
+        local blip_idx=\$((rem3 % ${N_BLIP}))
         v=0
         seed="\${V0_SEEDS[0]}"
     else
         # "rest" block (v in {2,4,...,20}), re-based to start at 0.
         local rgid=\$((gid - ${N_TASKS_V0}))
-        local zero_idx=\$((rgid % ${N_ZERO}))
-        local rem1=\$((rgid / ${N_ZERO}))
-        local v_idx=\$((rem1 % ${N_V_REST}))
-        local rem2=\$((rem1 / ${N_V_REST}))
-        local mix_idx=\$((rem2 % ${N_MIX}))
-        local rem3=\$((rem2 / ${N_MIX}))
-        local seed_idx=\$((rem3 % ${N_REST_SEED}))
-        local blip_idx=\$((rem3 / ${N_REST_SEED}))
+        local schedule_idx=\$((rgid % ${N_SCHEDULE}))
+        local rem1=\$((rgid / ${N_SCHEDULE}))
+        local zero_idx=\$((rem1 % ${N_ZERO}))
+        local rem2=\$((rem1 / ${N_ZERO}))
+        local v_idx=\$((rem2 % ${N_V_REST}))
+        local rem3=\$((rem2 / ${N_V_REST}))
+        local mix_idx=\$((rem3 % ${N_MIX}))
+        local rem4=\$((rem3 / ${N_MIX}))
+        local seed_idx=\$((rem4 % ${N_REST_SEED}))
+        local blip_idx=\$((rem4 / ${N_REST_SEED}))
         v="\${V_REST[\${v_idx}]}"
         seed="\${REST_SEEDS[\${seed_idx}]}"
     fi
@@ -369,6 +418,7 @@ run_replicate() {
     local l1="\${L1_SCALES[\${mix_idx}]}"
     local l2="\${L2_SCALES[\${mix_idx}]}"
     local zeroinit="\${ZERO_INITS[\${zero_idx}]}"
+    local schedulemode="\${SCHEDULE_MODES[\${schedule_idx}]}"
     local repdir="\${JOBDIR}/r\${gid}"
     mkdir -p "\${repdir}"
     cd "\${repdir}"
@@ -386,7 +436,7 @@ run_replicate() {
     local nbdir="\${repdir}/_nb"
     mkdir -p "\${nbdir}"
     cp "${BATCHDIR_JOBSOURCE}/${NOTEBOOK_PATH}" "\${nbdir}/${NOTEBOOK_NAME}.py"
-    echo "  [gid=\${gid}] blip_freq=\${blip} seed=\${seed} l1=\${l1} l2=\${l2} v=\${v} zero_init=\${zeroinit} repdir=\${repdir}"
+    echo "  [gid=\${gid}] blip_freq=\${blip} seed=\${seed} l1=\${l1} l2=\${l2} v=\${v} zero_init=\${zeroinit} schedule_mode=\${schedulemode} repdir=\${repdir}"
     python3.10 -m marimo export ipynb \
         --include-outputs --sort topological -f \
         "\${nbdir}/${NOTEBOOK_NAME}.py" \
@@ -398,6 +448,7 @@ run_replicate() {
         --l1-scale "\${l1}" \
         --l2-scale "\${l2}" \
         --blip-freq "\${blip}" \
+        --schedule-mode "\${schedulemode}" \
         --num-epoch ${NUM_EPOCH}
 
     # Fail loudly on a blank/failed export. marimo can exit 0 while
@@ -509,12 +560,12 @@ popd
 
 echo "   - join per-replicate timeseries parquets across all conditions"
 # Each replicate writes one self-describing timeseries parquet (v, seed,
-# zeroinit, l1scale, l2scale, blipfreq, numepoch, replicate columns
-# stamped by the notebook's run cell) under r<gid>/dd_trial_outputs/, so a
-# straight concatenation yields a collated frame spanning the whole sweep.
-# The G/B snapshot npz stores are NOT tabular (they're keyed arrays), so
-# they aren't joined here -- they ride along in the jobarchive tarball
-# above instead.
+# zeroinit, l1scale, l2scale, blipfreq, numepoch, schedulemode, replicate
+# columns stamped by the notebook's run cell) under r<gid>/dd_trial_outputs/,
+# so a straight concatenation yields a collated frame spanning the whole
+# sweep. The G/B snapshot npz stores are NOT tabular (they're keyed
+# arrays), so they aren't joined here -- they ride along in the
+# jobarchive tarball above instead.
 out_path="${BATCHDIR_JOBRESULT}/a=trace+date=${JOBDATE}+job=${JOBNAME}+ext=.pqt"
 ls -1 "${BATCHDIR}"/__*/**/dd_trial_outputs/*ext=.pqt 2>/dev/null \
     | tee /dev/stderr \
