@@ -99,7 +99,21 @@ def configure_trial(mo):
     l2_scale = _get("l2-scale", 0.005, float)
     blip_freq = _get("blip-freq", 0.66, float)
     num_epoch = _get("num-epoch", 100, int)
-    return blip_freq, l1_scale, l2_scale, num_epoch, seed, v_label, zero_init
+    # schedule_mode controls how ties are broken in the environment-order
+    # schedule (see weighted_interleave_fn below): "none" (deterministic,
+    # default), "local" (randomize among equally-due environments), or
+    # "global" (fully randomize the whole schedule's order).
+    schedule_mode = _get("schedule-mode", "none", lambda s: str(s).lower())
+    return (
+        blip_freq,
+        l1_scale,
+        l2_scale,
+        num_epoch,
+        schedule_mode,
+        seed,
+        v_label,
+        zero_init,
+    )
 
 
 @app.cell
@@ -109,6 +123,7 @@ def show_config(
     l2_scale,
     num_epoch,
     pd,
+    schedule_mode,
     seed,
     v_label,
     zero_init,
@@ -123,6 +138,7 @@ def show_config(
                 "l2_scale": l2_scale,
                 "blip_freq": blip_freq,
                 "num_epoch": num_epoch,
+                "schedule_mode": schedule_mode,
             }
         ]
     )
@@ -672,18 +688,47 @@ def delimit_model_constants(mo):
 
 @app.cell
 def weighted_interleave_fn(np):
-    def weighted_interleave(counts):
+    def weighted_interleave(counts, schedule_mode="none", rng=None):
+        # Greedy fair-queueing schedule: at each step, whichever
+        # environment is furthest behind its target proportion
+        # (counts[i] / total) goes next. schedule_mode controls how ties
+        # for "furthest behind" are broken -- ties are common here since
+        # e.g. all 3 true patterns share one count and all 3 blip patterns
+        # share another, so at any given step several environments are
+        # often equally due:
+        #   "none"   -- deterministic: always break toward the lowest
+        #               environment index (original behavior).
+        #   "local"  -- draw uniformly at random (via rng) among *all*
+        #               environments currently tied for furthest-behind,
+        #               instead of always the lowest index. This
+        #               randomizes presentation order within each natural
+        #               batch of equally-due environments while leaving
+        #               the overall per-environment counts/frequencies
+        #               exactly as requested.
+        #   "global" -- build the "none"-order schedule, then apply one
+        #               full random permutation (via rng) across the
+        #               entire sequence, discarding all local structure.
         total = sum(counts)
         seq = np.empty(total, dtype=np.int64)
         appeared = [0] * len(counts)
         for step in range(total):
-            deficits = [
-                (counts[i] / total) * (step + 1) - appeared[i]
-                for i in range(len(counts))
-            ]
-            i = max(range(len(counts)), key=lambda k: deficits[k])
+            deficits = np.asarray(
+                [
+                    (counts[i] / total) * (step + 1) - appeared[i]
+                    for i in range(len(counts))
+                ]
+            )
+            if schedule_mode == "local":
+                eligible = np.flatnonzero(
+                    np.isclose(deficits, deficits.max(), atol=1e-9)
+                )
+                i = int(rng.choice(eligible))
+            else:
+                i = int(np.argmax(deficits))
             seq[step] = i
             appeared[i] += 1
+        if schedule_mode == "global":
+            rng.shuffle(seq)
         return seq
 
     return (weighted_interleave,)
@@ -725,6 +770,8 @@ def build_schedule(
     TRAINING_SET,
     blip_freq,
     np,
+    schedule_mode,
+    seed,
     weighted_interleave,
 ):
     def make_blips():
@@ -750,7 +797,11 @@ def build_schedule(
     blip_counts[0] += TOTAL_BLOCKS - sum(blip_counts)
     assert sum(blip_counts) == TOTAL_BLOCKS
 
-    schedule = weighted_interleave(blip_counts)
+    assert schedule_mode in ("none", "local", "global")
+    _rng = np.random.default_rng(seed)
+    schedule = weighted_interleave(
+        blip_counts, schedule_mode=schedule_mode, rng=_rng
+    )
     assert schedule.shape[0] == TOTAL_BLOCKS
     return S1b, S2b, S3b, blip_counts, schedule, training_set
 
@@ -889,6 +940,7 @@ def run_trial(
     run_sswm_output_masked_scheduled_traced_zero_masked_elastic,
     sample_G,
     schedule,
+    schedule_mode,
     seed,
     time,
     training_set,
@@ -1031,6 +1083,7 @@ def run_trial(
         "l2scale": _w2,
         "blipfreq": blip_freq,
         "numepoch": _K,
+        "schedulemode": schedule_mode,
         "replicate": replicate_uid,
     }
 
@@ -1053,6 +1106,7 @@ def run_trial(
             "l2_scale": _bcast(_w2, np.float32),
             "blip_freq": _bcast(blip_freq, np.float32),
             "num_epoch": _bcast(_K, np.uint32),
+            "schedule_mode": pd.Categorical([schedule_mode] * _n_rows),
             "replicate_uid": pd.Categorical([replicate_uid] * _n_rows),
         }
     )
@@ -1088,6 +1142,7 @@ def run_trial(
         "l1_scale": _w1,
         "l2_scale": _w2,
         "blip_freq": blip_freq,
+        "schedule_mode": schedule_mode,
         "train_chi2": train_chi2,
         "test_chi2": test_chi2,
         "s1_blip_match_frac": s1_blip_match / FINAL_M,
