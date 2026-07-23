@@ -22,12 +22,12 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # Sweep: the single-trial elastic-net GRN notebook (v1..v20 double-descent
 # model) across:
 #   - blip_freq  in {0.66, 0.63, 0.6, 0.5}                          (4)
-#   - seed       in {1, 2}                                          (2 replicate seeds)
+#   - seed       in {1, 2, 3, 4}                                    (4 replicate seeds)
 #   - (l1_scale, l2_scale) in {(1.0, 0.0), (0.995, 0.005), (0.9933, 0.0067)}
 #     i.e. pure-L1, the notebook's default mix, and a near-pure-L1 mix (3)
-#   - v          in {0, 1, ..., 20}  (visible-gene count)           (21)
+#   - v          in {0}  (visible-gene count, v0 only)               (1)
 #   - zero_init  in {True, False}                                   (2)
-# 4 * 2 * 3 * 21 * 2 = 1008 replicates.
+# 4 * 4 * 3 * 1 * 2 = 96 replicates.
 #
 # Generations vs. epochs: the notebook's SSWM loop runs
 # TOTAL_BLOCKS (fixed at 3600 inside the notebook, not CLI-configurable)
@@ -42,7 +42,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # The cluster caps a job array at 1000 queued tasks, so we pack CHUNK=4
 # replicates into each array task and run those 4 *concurrently* (one CPU
 # each, see --cpus-per-task below) rather than sequentially --- this
-# divides 1008 replicates evenly into 1008 / 4 = 252 array tasks, keeping
+# divides 96 replicates evenly into 96 / 4 = 24 array tasks, keeping
 # per-task walltime ~1x a single replicate.
 #
 # Global replicate index r in [0, N_TASKS) decomposes fastest-varying
@@ -58,10 +58,10 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # takes ~100 minutes -- comfortably inside the 4-hour job time limit below
 # even allowing for slower cluster CPUs.
 BLIP_FREQS=(0.66 0.63 0.6 0.5)
-SEEDS=(1 2)
+SEEDS=(1 2 3 4)
 L1_SCALES=(1.0 0.995 0.9933)
 L2_SCALES=(0.0 0.005 0.0067)
-V_LABELS=(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20)
+V_LABELS=(0)
 ZERO_INITS=(True False)
 N_BLIP=${#BLIP_FREQS[@]}
 N_SEED=${#SEEDS[@]}
