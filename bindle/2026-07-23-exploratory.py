@@ -6,11 +6,13 @@ app = marimo.App(width="full")
 
 @app.cell
 def import_std():
+    import builtins
+    import contextlib
     import os
     import time
     import uuid
 
-    return os, time, uuid
+    return builtins, contextlib, os, time, uuid
 
 
 @app.cell
@@ -430,6 +432,7 @@ def masked_model_core(
 def masked_model_ext_elastic(
     BLIP_SET,
     benefit,
+    builtins,
     chi_squared,
     classify_by_phenotype_output_masked,
     classify_exact_counts,
@@ -443,6 +446,12 @@ def masked_model_ext_elastic(
     np,
     sample_G,
 ):
+    # marimo shadows the builtin `print` within each cell with its own
+    # output-capturing wrapper, which numba's nopython mode can't type --
+    # capture the real builtins.print here so the njit progress heartbeat
+    # below can reference a supported callable via closure.
+    _print = builtins.print
+
     @njit(fastmath=True)
     def fitness_output_masked_ext_elastic(
         G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
@@ -468,6 +477,7 @@ def masked_model_ext_elastic(
         snapshot_blocks,
         timeseries_blocks,
         n_score,
+        replicate_uid,
     ):
         np.random.seed(seed)
         n = G0.shape[0]
@@ -492,6 +502,19 @@ def masked_model_ext_elastic(
         ts_idx = 0
         snap_ptr = 0
         ts_ptr = 0
+
+        # Progress heartbeat: numba's nopython mode doesn't support
+        # time.time() (only plain print() with comma-separated args), so
+        # rather than pull in objmode just for a log line, approximate a
+        # ~20s cadence using the benchmarked single-threaded throughput of
+        # this loop (~83,000 gens/sec on non-cluster hardware) converted
+        # to a generation-count interval. Actual cadence scales with real
+        # hardware speed -- this is a "job is still alive" heartbeat, not
+        # a precise timer. The caller redirects stdout to a real log file
+        # for the duration of this call, since marimo's per-cell print
+        # capture would otherwise swallow this output (buffered into the
+        # exported notebook instead of being visible while the job runs).
+        LOG_EVERY_GENS = 1_660_000
 
         if snap_ptr < n_snap_pts and snapshot_blocks[snap_ptr] == 0:
             G_snap[snap_idx] = G
@@ -518,6 +541,20 @@ def masked_model_ext_elastic(
             if fp > f:
                 G = Gp
                 B = Bp
+
+            if (gen + 1) % LOG_EVERY_GENS == 0:
+                _print(
+                    "progress",
+                    replicate_uid,
+                    "seed",
+                    seed,
+                    "gen",
+                    gen + 1,
+                    "/",
+                    total_gens,
+                    "pct",
+                    (gen + 1) * 100 // total_gens,
+                )
 
             if (gen + 1) % K == 0:
                 completed_block = (gen + 1) // K
@@ -577,6 +614,7 @@ def masked_model_ext_elastic(
 def masked_model_zero_masked_elastic(
     BLIP_SET,
     benefit,
+    builtins,
     chi_squared,
     classify_by_phenotype_output_masked,
     classify_exact_counts,
@@ -590,6 +628,12 @@ def masked_model_zero_masked_elastic(
     np,
     sample_G,
 ):
+    # marimo shadows the builtin `print` within each cell with its own
+    # output-capturing wrapper, which numba's nopython mode can't type --
+    # capture the real builtins.print here so the njit progress heartbeat
+    # below can reference a supported callable via closure.
+    _print = builtins.print
+
     @njit(fastmath=True)
     def fitness_output_masked_zero_masked_elastic(
         G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
@@ -615,6 +659,7 @@ def masked_model_zero_masked_elastic(
         snapshot_blocks,
         timeseries_blocks,
         n_score,
+        replicate_uid,
     ):
         np.random.seed(seed)
         n = G0.shape[0]
@@ -639,6 +684,19 @@ def masked_model_zero_masked_elastic(
         ts_idx = 0
         snap_ptr = 0
         ts_ptr = 0
+
+        # Progress heartbeat: numba's nopython mode doesn't support
+        # time.time() (only plain print() with comma-separated args), so
+        # rather than pull in objmode just for a log line, approximate a
+        # ~20s cadence using the benchmarked single-threaded throughput of
+        # this loop (~83,000 gens/sec on non-cluster hardware) converted
+        # to a generation-count interval. Actual cadence scales with real
+        # hardware speed -- this is a "job is still alive" heartbeat, not
+        # a precise timer. The caller redirects stdout to a real log file
+        # for the duration of this call, since marimo's per-cell print
+        # capture would otherwise swallow this output (buffered into the
+        # exported notebook instead of being visible while the job runs).
+        LOG_EVERY_GENS = 1_660_000
 
         if snap_ptr < n_snap_pts and snapshot_blocks[snap_ptr] == 0:
             G_snap[snap_idx] = G
@@ -665,6 +723,20 @@ def masked_model_zero_masked_elastic(
             if fp > f:
                 G = Gp
                 B = Bp
+
+            if (gen + 1) % LOG_EVERY_GENS == 0:
+                _print(
+                    "progress",
+                    replicate_uid,
+                    "seed",
+                    seed,
+                    "gen",
+                    gen + 1,
+                    "/",
+                    total_gens,
+                    "pct",
+                    (gen + 1) * 100 // total_gens,
+                )
 
             if (gen + 1) % K == 0:
                 completed_block = (gen + 1) // K
@@ -972,6 +1044,7 @@ def run_trial(
     blip_freq,
     compute_errors_output_masked_ext,
     compute_errors_output_masked_zero_masked,
+    contextlib,
     kn,
     l1_cost,
     l1_scale,
@@ -980,6 +1053,7 @@ def run_trial(
     make_visible_mask,
     np,
     num_epoch,
+    os,
     pd,
     run_sswm_output_masked_scheduled_traced_ext_elastic,
     run_sswm_output_masked_scheduled_traced_zero_masked_elastic,
@@ -1004,111 +1078,147 @@ def run_trial(
     _G0 = np.zeros(N_TOTAL)
     _B0 = np.zeros((N_TOTAL, N_TOTAL))
 
-    _t_evo_start = time.time()
-    if zero_init:
-        (
-            _G,
-            _B,
-            _G_snap,
-            _B_snap,
-            _B_trace,
-        ) = run_sswm_output_masked_scheduled_traced_zero_masked_elastic(
-            _G0,
-            _B0,
-            training_set,
-            _K,
-            schedule,
-            LAM1,
-            LAM2,
-            _w1,
-            _w2,
-            _mask,
-            _seed,
-            SNAPSHOT_BLOCKS,
-            TIMESERIES_BLOCKS,
-            N_SCORE,
-        )
-
-        def _errors_fn(B_, seed_, M_):
-            return compute_errors_output_masked_zero_masked(
-                B_, _mask, seed=seed_, n_score=N_SCORE, M=M_
-            )
-
-    else:
-        (
-            _G,
-            _B,
-            _G_snap,
-            _B_snap,
-            _B_trace,
-        ) = run_sswm_output_masked_scheduled_traced_ext_elastic(
-            _G0,
-            _B0,
-            training_set,
-            _K,
-            schedule,
-            LAM1,
-            LAM2,
-            _w1,
-            _w2,
-            _mask,
-            _seed,
-            SNAPSHOT_BLOCKS,
-            TIMESERIES_BLOCKS,
-            N_SCORE,
-        )
-
-        def _errors_fn(B_, seed_, M_):
-            return compute_errors_output_masked_ext(
-                B_, _mask, seed=seed_, n_score=N_SCORE, M=M_
-            )
-
-    # the SSWM loop is a single compiled call, so per-timepoint timestamps
-    # aren't directly observable -- _sswm_wall is the true measured duration
-    # of the whole call, and each row's walltime below is interpolated
-    # proportional to how far through the generation count that row sits
-    # (a reasonable estimate since SSWM's cost is ~constant per generation).
-    _sswm_wall = time.time() - _t_evo_start
-
-    # M for the (dense, ~thousands of points) per-timepoint trace calls --
-    # kept small relative to FINAL_M below since it's paid many times over.
-    _TRACE_M = 2000
-
-    _n_ts = _B_trace.shape[0]
-    trace_gens = [int(_b) * _K for _b in TIMESERIES_BLOCKS]
-    _total_gens = trace_gens[-1] if trace_gens[-1] > 0 else 1
-    trace_walltime = [_sswm_wall * (g / _total_gens) for g in trace_gens]
-    trace_pure_train, trace_test, trace_blip_train, trace_other_chi2 = (
-        [],
-        [],
-        [],
-        [],
+    # marimo captures each cell's stdout internally (buffering it into the
+    # exported notebook rather than passing it through to the real
+    # terminal), so the print()-based progress heartbeats below wouldn't
+    # otherwise be visible while a long SLURM job is running. Redirecting
+    # stdout to a real file for the duration of the run sidesteps that --
+    # the file can be tailed live to watch progress.
+    _progress_log_path = os.path.join(
+        OUTPUT_DIR, f"progress_{replicate_uid}.log"
     )
-    trace_class_counts, trace_blip_counts, trace_n_other = [], [], []
-    # L1/L2/regularization loss depend only on B (not on sampled genotypes),
-    # so they're computed directly here rather than threaded through
-    # _errors_fn. l1_loss/l2_loss are the raw, unweighted per-entry-mean
-    # costs -- recorded regardless of how l1_scale/l2_scale are configured
-    # for this replicate -- while regularization_loss is the actual
-    # weighted penalty subtracted from benefit in the fitness function
-    # driving evolution (w1 * LAM1 * l1_cost(B) + w2 * LAM2 * l2_cost(B)).
-    trace_l1_loss, trace_l2_loss, trace_reg_loss = [], [], []
-    for _i in range(_n_ts):
-        _ptr, _te, _btr, _cc, _bc, _oc, _noc = _errors_fn(
-            _B_trace[_i], _seed + 2000, _TRACE_M
+
+    _t_evo_start = time.time()
+    with (
+        open(_progress_log_path, "w", buffering=1) as _progress_f,
+        contextlib.redirect_stdout(_progress_f),
+    ):
+        if zero_init:
+            (
+                _G,
+                _B,
+                _G_snap,
+                _B_snap,
+                _B_trace,
+            ) = run_sswm_output_masked_scheduled_traced_zero_masked_elastic(
+                _G0,
+                _B0,
+                training_set,
+                _K,
+                schedule,
+                LAM1,
+                LAM2,
+                _w1,
+                _w2,
+                _mask,
+                _seed,
+                SNAPSHOT_BLOCKS,
+                TIMESERIES_BLOCKS,
+                N_SCORE,
+                replicate_uid,
+            )
+
+            def _errors_fn(B_, seed_, M_):
+                return compute_errors_output_masked_zero_masked(
+                    B_, _mask, seed=seed_, n_score=N_SCORE, M=M_
+                )
+
+        else:
+            (
+                _G,
+                _B,
+                _G_snap,
+                _B_snap,
+                _B_trace,
+            ) = run_sswm_output_masked_scheduled_traced_ext_elastic(
+                _G0,
+                _B0,
+                training_set,
+                _K,
+                schedule,
+                LAM1,
+                LAM2,
+                _w1,
+                _w2,
+                _mask,
+                _seed,
+                SNAPSHOT_BLOCKS,
+                TIMESERIES_BLOCKS,
+                N_SCORE,
+                replicate_uid,
+            )
+
+            def _errors_fn(B_, seed_, M_):
+                return compute_errors_output_masked_ext(
+                    B_, _mask, seed=seed_, n_score=N_SCORE, M=M_
+                )
+
+        # the SSWM loop is a single compiled call, so per-timepoint
+        # timestamps aren't directly observable -- _sswm_wall is the true
+        # measured duration of the whole call, and each row's walltime
+        # below is interpolated proportional to how far through the
+        # generation count that row sits (a reasonable estimate since
+        # SSWM's cost is ~constant per generation).
+        _sswm_wall = time.time() - _t_evo_start
+
+        # M for the (dense, ~thousands of points) per-timepoint trace
+        # calls -- kept small relative to FINAL_M below since it's paid
+        # many times over.
+        _TRACE_M = 2000
+
+        _n_ts = _B_trace.shape[0]
+        trace_gens = [int(_b) * _K for _b in TIMESERIES_BLOCKS]
+        _total_gens = trace_gens[-1] if trace_gens[-1] > 0 else 1
+        trace_walltime = [_sswm_wall * (g / _total_gens) for g in trace_gens]
+        trace_pure_train, trace_test, trace_blip_train, trace_other_chi2 = (
+            [],
+            [],
+            [],
+            [],
         )
-        trace_pure_train.append(_ptr)
-        trace_test.append(_te)
-        trace_blip_train.append(_btr)
-        trace_class_counts.append(_cc)
-        trace_blip_counts.append(_bc)
-        trace_other_chi2.append(_oc)
-        trace_n_other.append(_noc)
-        _l1 = l1_cost(_B_trace[_i])
-        _l2 = l2_cost(_B_trace[_i])
-        trace_l1_loss.append(_l1)
-        trace_l2_loss.append(_l2)
-        trace_reg_loss.append(_w1 * LAM1 * _l1 + _w2 * LAM2 * _l2)
+        trace_class_counts, trace_blip_counts, trace_n_other = [], [], []
+        # L1/L2/regularization loss depend only on B (not on sampled
+        # genotypes), so they're computed directly here rather than
+        # threaded through _errors_fn. l1_loss/l2_loss are the raw,
+        # unweighted per-entry-mean costs -- recorded regardless of how
+        # l1_scale/l2_scale are configured for this replicate -- while
+        # regularization_loss is the actual weighted penalty subtracted
+        # from benefit in the fitness function driving evolution
+        # (w1 * LAM1 * l1_cost(B) + w2 * LAM2 * l2_cost(B)).
+        trace_l1_loss, trace_l2_loss, trace_reg_loss = [], [], []
+        _trace_log_start = time.time()
+        _trace_last_log = _trace_log_start
+        for _i in range(_n_ts):
+            _ptr, _te, _btr, _cc, _bc, _oc, _noc = _errors_fn(
+                _B_trace[_i], _seed + 2000, _TRACE_M
+            )
+            trace_pure_train.append(_ptr)
+            trace_test.append(_te)
+            trace_blip_train.append(_btr)
+            trace_class_counts.append(_cc)
+            trace_blip_counts.append(_bc)
+            trace_other_chi2.append(_oc)
+            trace_n_other.append(_noc)
+            _l1 = l1_cost(_B_trace[_i])
+            _l2 = l2_cost(_B_trace[_i])
+            trace_l1_loss.append(_l1)
+            trace_l2_loss.append(_l2)
+            trace_reg_loss.append(_w1 * LAM1 * _l1 + _w2 * LAM2 * _l2)
+            _trace_now = time.time()
+            if _trace_now - _trace_last_log >= 20:
+                print(
+                    "progress",
+                    replicate_uid,
+                    "seed",
+                    _seed,
+                    "trace",
+                    _i + 1,
+                    "/",
+                    _n_ts,
+                    "elapsed_sec",
+                    int(_trace_now - _trace_log_start),
+                )
+                _trace_last_log = _trace_now
     # class_counts: (n_rows, 9) -- CLASS_8 classes 1..8 then "other".
     # blip_counts: (n_rows, 3) -- S1b, S2b, S3b exact-match counts.
     _class_counts_arr = np.asarray(trace_class_counts)
