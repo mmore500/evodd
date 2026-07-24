@@ -6,11 +6,16 @@ app = marimo.App(width="full")
 
 @app.cell
 def import_std():
+    import builtins
+    import contextlib
     import os
+    import sys
+    import threading
     import time
     import uuid
+    import zipfile
 
-    return os, time, uuid
+    return builtins, contextlib, os, sys, threading, time, uuid, zipfile
 
 
 @app.cell
@@ -430,6 +435,7 @@ def masked_model_core(
 def masked_model_ext_elastic(
     BLIP_SET,
     benefit,
+    builtins,
     chi_squared,
     classify_by_phenotype_output_masked,
     classify_exact_counts,
@@ -443,6 +449,12 @@ def masked_model_ext_elastic(
     np,
     sample_G,
 ):
+    # marimo shadows the builtin `print` within each cell with its own
+    # output-capturing wrapper, which numba's nopython mode can't type --
+    # capture the real builtins.print here so the njit progress heartbeat
+    # below can reference a supported callable via closure.
+    _print = builtins.print
+
     @njit(fastmath=True)
     def fitness_output_masked_ext_elastic(
         G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
@@ -452,7 +464,21 @@ def masked_model_ext_elastic(
         c = w1 * lam1 * l1_cost(B) + w2 * lam2 * l2_cost(B)
         return b - c
 
-    @njit
+    # nogil=True releases the GIL for the duration of this call (pure
+    # nopython numeric code, no Python objects touched), so a plain Python
+    # watcher thread in the caller can concurrently poll progress_counts
+    # and drain newly-written G_snap/B_snap/B_trace rows to disk as they
+    # appear -- this is what makes output progressively durable against a
+    # SLURM job timeout, without restructuring this loop into resumable
+    # chunks. G_snap/B_snap/B_trace are caller-allocated and filled
+    # in-place; progress_counts (shape (2,), int64) publishes how many
+    # snapshot/timeseries rows are safe to read -- the count is only
+    # bumped *after* the corresponding row is fully written, so a watcher
+    # thread that only reads indices below the last-seen count never
+    # observes a partial row. numba's print() internally reacquires the
+    # GIL for the duration of the call (see numba.cpython.printimpl), so
+    # it's safe to call here despite nogil=True.
+    @njit(nogil=True)
     def run_sswm_output_masked_scheduled_traced_ext_elastic(
         G0,
         B0,
@@ -468,9 +494,12 @@ def masked_model_ext_elastic(
         snapshot_blocks,
         timeseries_blocks,
         n_score,
+        G_snap,
+        B_snap,
+        B_trace,
+        progress_counts,
     ):
         np.random.seed(seed)
-        n = G0.shape[0]
         G = G0.copy()
         B = B0.copy()
         n_blocks = schedule.shape[0]
@@ -482,26 +511,32 @@ def masked_model_ext_elastic(
         # cadence can be arbitrarily (non-uniformly) spaced.
         n_snap_pts = snapshot_blocks.shape[0]
         n_ts_pts = timeseries_blocks.shape[0]
-        G_snap = np.empty((n_snap_pts, n))
-        B_snap = np.empty((n_snap_pts, n, n))
-        # B_trace holds a B copy at every timeseries point for post-hoc
-        # error computation -- G isn't needed there (compute_errors draws
-        # fresh genotype samples rather than reusing evolved G).
-        B_trace = np.empty((n_ts_pts, n, n))
         snap_idx = 0
         ts_idx = 0
         snap_ptr = 0
         ts_ptr = 0
+
+        # Additional heartbeat directly from inside the loop, independent
+        # of the caller's watcher thread -- numba's nopython mode doesn't
+        # support time.time() (only plain print() with comma-separated
+        # args), so approximate a ~20s cadence using the benchmarked
+        # single-threaded throughput of this loop (~83,000 gens/sec on
+        # non-cluster hardware) converted to a generation-count interval.
+        # Actual cadence scales with real hardware speed -- this is a
+        # "job is still alive" signal, not a precise timer.
+        LOG_EVERY_GENS = 1_660_000
 
         if snap_ptr < n_snap_pts and snapshot_blocks[snap_ptr] == 0:
             G_snap[snap_idx] = G
             B_snap[snap_idx] = B
             snap_idx += 1
             snap_ptr += 1
+            progress_counts[0] = snap_idx
         if ts_ptr < n_ts_pts and timeseries_blocks[ts_ptr] == 0:
             B_trace[ts_idx] = B
             ts_idx += 1
             ts_ptr += 1
+            progress_counts[1] = ts_idx
 
         for gen in range(total_gens):
             block = gen // K
@@ -519,6 +554,19 @@ def masked_model_ext_elastic(
                 G = Gp
                 B = Bp
 
+            if (gen + 1) % LOG_EVERY_GENS == 0:
+                _print(
+                    "njit-heartbeat",
+                    "seed",
+                    seed,
+                    "gen",
+                    gen + 1,
+                    "/",
+                    total_gens,
+                    "pct",
+                    (gen + 1) * 100 // total_gens,
+                )
+
             if (gen + 1) % K == 0:
                 completed_block = (gen + 1) // K
                 if (
@@ -529,6 +577,7 @@ def masked_model_ext_elastic(
                     B_snap[snap_idx] = B
                     snap_idx += 1
                     snap_ptr += 1
+                    progress_counts[0] = snap_idx
                 if (
                     ts_ptr < n_ts_pts
                     and completed_block == timeseries_blocks[ts_ptr]
@@ -536,8 +585,9 @@ def masked_model_ext_elastic(
                     B_trace[ts_idx] = B
                     ts_idx += 1
                     ts_ptr += 1
+                    progress_counts[1] = ts_idx
 
-        return G, B, G_snap, B_snap, B_trace
+        return G, B
 
     def compute_errors_output_masked_ext(
         B, visible_mask, seed, n_score, M=100_000
@@ -577,6 +627,7 @@ def masked_model_ext_elastic(
 def masked_model_zero_masked_elastic(
     BLIP_SET,
     benefit,
+    builtins,
     chi_squared,
     classify_by_phenotype_output_masked,
     classify_exact_counts,
@@ -590,6 +641,12 @@ def masked_model_zero_masked_elastic(
     np,
     sample_G,
 ):
+    # marimo shadows the builtin `print` within each cell with its own
+    # output-capturing wrapper, which numba's nopython mode can't type --
+    # capture the real builtins.print here so the njit progress heartbeat
+    # below can reference a supported callable via closure.
+    _print = builtins.print
+
     @njit(fastmath=True)
     def fitness_output_masked_zero_masked_elastic(
         G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
@@ -599,7 +656,21 @@ def masked_model_zero_masked_elastic(
         c = w1 * lam1 * l1_cost(B) + w2 * lam2 * l2_cost(B)
         return b - c
 
-    @njit
+    # nogil=True releases the GIL for the duration of this call (pure
+    # nopython numeric code, no Python objects touched), so a plain Python
+    # watcher thread in the caller can concurrently poll progress_counts
+    # and drain newly-written G_snap/B_snap/B_trace rows to disk as they
+    # appear -- this is what makes output progressively durable against a
+    # SLURM job timeout, without restructuring this loop into resumable
+    # chunks. G_snap/B_snap/B_trace are caller-allocated and filled
+    # in-place; progress_counts (shape (2,), int64) publishes how many
+    # snapshot/timeseries rows are safe to read -- the count is only
+    # bumped *after* the corresponding row is fully written, so a watcher
+    # thread that only reads indices below the last-seen count never
+    # observes a partial row. numba's print() internally reacquires the
+    # GIL for the duration of the call (see numba.cpython.printimpl), so
+    # it's safe to call here despite nogil=True.
+    @njit(nogil=True)
     def run_sswm_output_masked_scheduled_traced_zero_masked_elastic(
         G0,
         B0,
@@ -615,9 +686,12 @@ def masked_model_zero_masked_elastic(
         snapshot_blocks,
         timeseries_blocks,
         n_score,
+        G_snap,
+        B_snap,
+        B_trace,
+        progress_counts,
     ):
         np.random.seed(seed)
-        n = G0.shape[0]
         G = G0.copy()
         B = B0.copy()
         n_blocks = schedule.shape[0]
@@ -629,26 +703,32 @@ def masked_model_zero_masked_elastic(
         # cadence can be arbitrarily (non-uniformly) spaced.
         n_snap_pts = snapshot_blocks.shape[0]
         n_ts_pts = timeseries_blocks.shape[0]
-        G_snap = np.empty((n_snap_pts, n))
-        B_snap = np.empty((n_snap_pts, n, n))
-        # B_trace holds a B copy at every timeseries point for post-hoc
-        # error computation -- G isn't needed there (compute_errors draws
-        # fresh genotype samples rather than reusing evolved G).
-        B_trace = np.empty((n_ts_pts, n, n))
         snap_idx = 0
         ts_idx = 0
         snap_ptr = 0
         ts_ptr = 0
+
+        # Additional heartbeat directly from inside the loop, independent
+        # of the caller's watcher thread -- numba's nopython mode doesn't
+        # support time.time() (only plain print() with comma-separated
+        # args), so approximate a ~20s cadence using the benchmarked
+        # single-threaded throughput of this loop (~83,000 gens/sec on
+        # non-cluster hardware) converted to a generation-count interval.
+        # Actual cadence scales with real hardware speed -- this is a
+        # "job is still alive" signal, not a precise timer.
+        LOG_EVERY_GENS = 1_660_000
 
         if snap_ptr < n_snap_pts and snapshot_blocks[snap_ptr] == 0:
             G_snap[snap_idx] = G
             B_snap[snap_idx] = B
             snap_idx += 1
             snap_ptr += 1
+            progress_counts[0] = snap_idx
         if ts_ptr < n_ts_pts and timeseries_blocks[ts_ptr] == 0:
             B_trace[ts_idx] = B
             ts_idx += 1
             ts_ptr += 1
+            progress_counts[1] = ts_idx
 
         for gen in range(total_gens):
             block = gen // K
@@ -666,6 +746,19 @@ def masked_model_zero_masked_elastic(
                 G = Gp
                 B = Bp
 
+            if (gen + 1) % LOG_EVERY_GENS == 0:
+                _print(
+                    "njit-heartbeat",
+                    "seed",
+                    seed,
+                    "gen",
+                    gen + 1,
+                    "/",
+                    total_gens,
+                    "pct",
+                    (gen + 1) * 100 // total_gens,
+                )
+
             if (gen + 1) % K == 0:
                 completed_block = (gen + 1) // K
                 if (
@@ -676,6 +769,7 @@ def masked_model_zero_masked_elastic(
                     B_snap[snap_idx] = B
                     snap_idx += 1
                     snap_ptr += 1
+                    progress_counts[0] = snap_idx
                 if (
                     ts_ptr < n_ts_pts
                     and completed_block == timeseries_blocks[ts_ptr]
@@ -683,8 +777,9 @@ def masked_model_zero_masked_elastic(
                     B_trace[ts_idx] = B
                     ts_idx += 1
                     ts_ptr += 1
+                    progress_counts[1] = ts_idx
 
-        return G, B, G_snap, B_snap, B_trace
+        return G, B
 
     def compute_errors_output_masked_zero_masked(
         B, visible_mask, seed, n_score, M=100_000
@@ -950,6 +1045,46 @@ def show_timepoint_counts(SNAPSHOT_BLOCKS, TIMESERIES_BLOCKS, pd):
 
 
 @app.cell(hide_code=True)
+def delimit_progressive_io(mo):
+    mo.md(
+        """
+    ## Progressive output helpers
+
+    G/B snapshots are appended to `.npz` files one array at a time (rather
+    than written once via `np.savez_compressed` at the end) using the same
+    zip-of-`.npy`-members format `np.savez` produces internally, just
+    opened in append mode per write. Timeseries rows are appended to a
+    `.csv` (rather than buffered into a DataFrame and written once as
+    `.pqt`) since CSV supports genuine line-at-a-time appends. Both let a
+    replicate's output survive a SLURM job timeout with only whatever was
+    written between the last append and the kill lost, instead of losing
+    the entire run.
+    """
+    )
+    return
+
+
+@app.cell
+def progressive_io_helpers(np, pd, zipfile):
+    from numpy.lib import format as npy_format
+
+    def append_npz_array(path, key, arr, first):
+        mode = "w" if first else "a"
+        with zipfile.ZipFile(
+            path, mode=mode, compression=zipfile.ZIP_DEFLATED
+        ) as zf:
+            with zf.open(f"{key}.npy", "w", force_zip64=True) as f:
+                npy_format.write_array(f, np.asarray(arr))
+
+    def append_csv_row(path, row, columns, first):
+        pd.DataFrame([row], columns=columns).to_csv(
+            path, mode="w" if first else "a", header=first, index=False
+        )
+
+    return append_csv_row, append_npz_array
+
+
+@app.cell(hide_code=True)
 def delimit_run_trial(mo):
     mo.md(
         """
@@ -969,9 +1104,12 @@ def run_trial(
     OUTPUT_DIR,
     SNAPSHOT_BLOCKS,
     TIMESERIES_BLOCKS,
+    append_csv_row,
+    append_npz_array,
     blip_freq,
     compute_errors_output_masked_ext,
     compute_errors_output_masked_zero_masked,
+    contextlib,
     kn,
     l1_cost,
     l1_scale,
@@ -986,6 +1124,8 @@ def run_trial(
     schedule,
     schedule_mode,
     seed,
+    sys,
+    threading,
     time,
     training_set,
     uuid,
@@ -1004,30 +1144,8 @@ def run_trial(
     _G0 = np.zeros(N_TOTAL)
     _B0 = np.zeros((N_TOTAL, N_TOTAL))
 
-    _t_evo_start = time.time()
     if zero_init:
-        (
-            _G,
-            _B,
-            _G_snap,
-            _B_snap,
-            _B_trace,
-        ) = run_sswm_output_masked_scheduled_traced_zero_masked_elastic(
-            _G0,
-            _B0,
-            training_set,
-            _K,
-            schedule,
-            LAM1,
-            LAM2,
-            _w1,
-            _w2,
-            _mask,
-            _seed,
-            SNAPSHOT_BLOCKS,
-            TIMESERIES_BLOCKS,
-            N_SCORE,
-        )
+        _run_sswm = run_sswm_output_masked_scheduled_traced_zero_masked_elastic
 
         def _errors_fn(B_, seed_, M_):
             return compute_errors_output_masked_zero_masked(
@@ -1035,84 +1153,300 @@ def run_trial(
             )
 
     else:
-        (
-            _G,
-            _B,
-            _G_snap,
-            _B_snap,
-            _B_trace,
-        ) = run_sswm_output_masked_scheduled_traced_ext_elastic(
-            _G0,
-            _B0,
-            training_set,
-            _K,
-            schedule,
-            LAM1,
-            LAM2,
-            _w1,
-            _w2,
-            _mask,
-            _seed,
-            SNAPSHOT_BLOCKS,
-            TIMESERIES_BLOCKS,
-            N_SCORE,
-        )
+        _run_sswm = run_sswm_output_masked_scheduled_traced_ext_elastic
 
         def _errors_fn(B_, seed_, M_):
             return compute_errors_output_masked_ext(
                 B_, _mask, seed=seed_, n_score=N_SCORE, M=M_
             )
 
-    # the SSWM loop is a single compiled call, so per-timepoint timestamps
-    # aren't directly observable -- _sswm_wall is the true measured duration
-    # of the whole call, and each row's walltime below is interpolated
-    # proportional to how far through the generation count that row sits
-    # (a reasonable estimate since SSWM's cost is ~constant per generation).
-    _sswm_wall = time.time() - _t_evo_start
-
     # M for the (dense, ~thousands of points) per-timepoint trace calls --
     # kept small relative to FINAL_M below since it's paid many times over.
     _TRACE_M = 2000
 
-    _n_ts = _B_trace.shape[0]
-    trace_gens = [int(_b) * _K for _b in TIMESERIES_BLOCKS]
-    _total_gens = trace_gens[-1] if trace_gens[-1] > 0 else 1
-    trace_walltime = [_sswm_wall * (g / _total_gens) for g in trace_gens]
-    trace_pure_train, trace_test, trace_blip_train, trace_other_chi2 = (
-        [],
-        [],
-        [],
-        [],
+    _n_snap = SNAPSHOT_BLOCKS.shape[0]
+    _n_ts = TIMESERIES_BLOCKS.shape[0]
+    _snapshot_gens = np.asarray(SNAPSHOT_BLOCKS, dtype=np.int64) * _K
+    trace_gens = np.asarray(TIMESERIES_BLOCKS, dtype=np.int64) * _K
+
+    # G_snap/B_snap/B_trace are allocated here (rather than inside the
+    # njit call) and filled in-place by it, so the watcher thread below
+    # can read newly-completed rows out of the same arrays concurrently.
+    _G_snap = np.empty((_n_snap, N_TOTAL))
+    _B_snap = np.empty((_n_snap, N_TOTAL, N_TOTAL))
+    _B_trace = np.empty((_n_ts, N_TOTAL, N_TOTAL))
+    # progress_counts[0]/[1] publish how many snapshot/timeseries rows the
+    # njit call has fully written -- see the nogil comment on the njit
+    # function itself for the publish-count-last safety argument.
+    _progress_counts = np.zeros(2, dtype=np.int64)
+
+    # --- output paths, self-describing via keyname.pack (every run option
+    # as a key=value segment). Timeseries rows are written progressively
+    # to CSV as each row becomes available during the run (CSV supports
+    # genuine line-at-a-time appends, unlike parquet), so a SLURM job
+    # timeout only loses whatever was written since the last append
+    # instead of the entire run's output; G/B snapshots are likewise
+    # appended to .npz files one array at a time. Per-replicate output
+    # stays CSV -- the downstream collation step converts to parquet
+    # itself (joinem infers CSV input / parquet output from file
+    # extensions) once all replicates' timeseries are joined into one
+    # frame, rather than every replicate separately producing its own
+    # parquet file only to be re-read and re-written at collation time.
+    _run_params = {
+        "v": _v,
+        "seed": _seed,
+        "zeroinit": zero_init,
+        "l1scale": _w1,
+        "l2scale": _w2,
+        "blipfreq": blip_freq,
+        "numepoch": _K,
+        "schedulemode": schedule_mode,
+        "replicate": replicate_uid,
+    }
+    timeseries_path = f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'ext': '.csv'})}"
+    G_snapshots_path = (
+        f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'what': 'G', 'ext': '.npz'})}"
     )
-    trace_class_counts, trace_blip_counts, trace_n_other = [], [], []
-    # L1/L2/regularization loss depend only on B (not on sampled genotypes),
-    # so they're computed directly here rather than threaded through
-    # _errors_fn. l1_loss/l2_loss are the raw, unweighted per-entry-mean
-    # costs -- recorded regardless of how l1_scale/l2_scale are configured
-    # for this replicate -- while regularization_loss is the actual
-    # weighted penalty subtracted from benefit in the fitness function
-    # driving evolution (w1 * LAM1 * l1_cost(B) + w2 * LAM2 * l2_cost(B)).
-    trace_l1_loss, trace_l2_loss, trace_reg_loss = [], [], []
-    for _i in range(_n_ts):
+    B_snapshots_path = (
+        f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'what': 'B', 'ext': '.npz'})}"
+    )
+
+    # Per-class fraction columns (share of _TRACE_M samples landing exactly
+    # on each phenotype): test1_frac..test8_frac are the 8 CLASS_8 classes
+    # in order; train1_frac..train3_frac are the 3 of those 8 that are
+    # also unblipped training patterns (CLASS_8 indices 0, 3, 6 -- S1, S2,
+    # S3), duplicated under their own names for self-documenting clarity
+    # even though train{i}_frac == test{1,4,7}_frac by construction.
+    _trace_columns = (
+        [
+            "epoch",
+            "generation",
+            "walltime_sec",
+            "pure_train_chi2",
+            "test_chi2",
+            "blip_train_chi2",
+        ]
+        + [f"test{_j + 1}_frac" for _j in range(8)]
+        + [f"train{_j + 1}_frac" for _j in range(3)]
+        + [f"s{_j + 1}_blip_match_frac" for _j in range(3)]
+        + [
+            "other_frac",
+            "other_chi2",
+            "other_n_classes",
+            "l1_loss",
+            "l2_loss",
+            "regularization_loss",
+            "v",
+            "seed",
+            "zero_init",
+            "l1_scale",
+            "l2_scale",
+            "blip_freq",
+            "num_epoch",
+            "schedule_mode",
+            "replicate_uid",
+        ]
+    )
+
+    def _trace_row(_i, _t_evo_start):
+        # L1/L2/regularization loss depend only on B (not on sampled
+        # genotypes). l1_loss/l2_loss are the raw, unweighted per-entry
+        # -mean costs -- recorded regardless of how l1_scale/l2_scale are
+        # configured for this replicate -- while regularization_loss is
+        # the actual weighted penalty subtracted from benefit in the
+        # fitness function driving evolution.
         _ptr, _te, _btr, _cc, _bc, _oc, _noc = _errors_fn(
             _B_trace[_i], _seed + 2000, _TRACE_M
         )
-        trace_pure_train.append(_ptr)
-        trace_test.append(_te)
-        trace_blip_train.append(_btr)
-        trace_class_counts.append(_cc)
-        trace_blip_counts.append(_bc)
-        trace_other_chi2.append(_oc)
-        trace_n_other.append(_noc)
         _l1 = l1_cost(_B_trace[_i])
         _l2 = l2_cost(_B_trace[_i])
-        trace_l1_loss.append(_l1)
-        trace_l2_loss.append(_l2)
-        trace_reg_loss.append(_w1 * LAM1 * _l1 + _w2 * LAM2 * _l2)
-    # class_counts: (n_rows, 9) -- CLASS_8 classes 1..8 then "other".
-    # blip_counts: (n_rows, 3) -- S1b, S2b, S3b exact-match counts.
-    _class_counts_arr = np.asarray(trace_class_counts)
-    _blip_counts_arr = np.asarray(trace_blip_counts)
+        _row = {
+            "epoch": _i,
+            "generation": int(trace_gens[_i]),
+            # each row's timestamp is measured live as the watcher thread
+            # observes it (rather than interpolated after the fact),
+            # since the njit call runs concurrently (nogil) with this
+            # thread instead of as one opaque, unobservable block.
+            "walltime_sec": time.time() - _t_evo_start,
+            "pure_train_chi2": float(_ptr),
+            "test_chi2": float(_te),
+            "blip_train_chi2": float(_btr),
+        }
+        for _j in range(8):
+            _row[f"test{_j + 1}_frac"] = float(_cc[_j]) / _TRACE_M
+        for _j, _tc in enumerate([0, 3, 6]):
+            _row[f"train{_j + 1}_frac"] = float(_cc[_tc]) / _TRACE_M
+        for _j in range(3):
+            _row[f"s{_j + 1}_blip_match_frac"] = float(_bc[_j]) / _TRACE_M
+        _row["other_frac"] = float(_cc[8]) / _TRACE_M
+        _row["other_chi2"] = float(_oc)
+        _row["other_n_classes"] = int(_noc)
+        _row["l1_loss"] = float(_l1)
+        _row["l2_loss"] = float(_l2)
+        _row["regularization_loss"] = float(
+            _w1 * LAM1 * _l1 + _w2 * LAM2 * _l2
+        )
+        _row["v"] = _v
+        _row["seed"] = _seed
+        _row["zero_init"] = zero_init
+        _row["l1_scale"] = _w1
+        _row["l2_scale"] = _w2
+        _row["blip_freq"] = blip_freq
+        _row["num_epoch"] = _K
+        _row["schedule_mode"] = schedule_mode
+        _row["replicate_uid"] = replicate_uid
+        return _row
+
+    _trace_rows = []
+    _stop_event = threading.Event()
+    _watcher_exc = [None]
+    _log_start = time.time()
+    # Shared, mutable drain progress -- a dict (rather than locals closed
+    # over by _watcher alone) so both the watcher thread's periodic polls
+    # and the guaranteed final drain call after it exits (see below) can
+    # resume from the same cursor.
+    _drain_state = {
+        "last_snap": 0,
+        "last_ts": 0,
+        "first_g": True,
+        "first_b": True,
+        "first_csv": True,
+    }
+
+    def _drain(_t_evo_start, _label):
+        # Reads progress_counts (published by the nogil njit call running
+        # concurrently on the main thread) and, if it has advanced,
+        # writes the newly-available snapshot/timeseries rows straight to
+        # disk. Every call logs the attempt; a second line logs the save
+        # only when one actually happens, so "checked, nothing new yet"
+        # and "wrote N rows" are distinguishable in the log.
+        _snap_n = int(_progress_counts[0])
+        _ts_n = int(_progress_counts[1])
+        print(
+            "poll-attempt",
+            replicate_uid,
+            "label",
+            _label,
+            "snap",
+            _snap_n,
+            "/",
+            _n_snap,
+            "ts",
+            _ts_n,
+            "/",
+            _n_ts,
+            "elapsed_sec",
+            int(time.time() - _log_start),
+        )
+        if (
+            _snap_n <= _drain_state["last_snap"]
+            and _ts_n <= _drain_state["last_ts"]
+        ):
+            return
+        # deliberate pause between observing that new rows are ready and
+        # actually reading + writing them, as an extra margin of safety
+        # on top of the publish-count-last ordering guarantee.
+        time.sleep(1.0)
+        _wrote_snap = 0
+        while _drain_state["last_snap"] < _snap_n:
+            _i = _drain_state["last_snap"]
+            _key = f"gen{int(_snapshot_gens[_i]):012d}"
+            append_npz_array(
+                G_snapshots_path, _key, _G_snap[_i], _drain_state["first_g"]
+            )
+            append_npz_array(
+                B_snapshots_path, _key, _B_snap[_i], _drain_state["first_b"]
+            )
+            _drain_state["first_g"] = False
+            _drain_state["first_b"] = False
+            _drain_state["last_snap"] += 1
+            _wrote_snap += 1
+        _wrote_ts = 0
+        while _drain_state["last_ts"] < _ts_n:
+            _i = _drain_state["last_ts"]
+            _row = _trace_row(_i, _t_evo_start)
+            _trace_rows.append(_row)
+            append_csv_row(
+                timeseries_path,
+                _row,
+                _trace_columns,
+                _drain_state["first_csv"],
+            )
+            _drain_state["first_csv"] = False
+            _drain_state["last_ts"] += 1
+            _wrote_ts += 1
+        print(
+            "saved",
+            replicate_uid,
+            "label",
+            _label,
+            "wrote_snap",
+            _wrote_snap,
+            "wrote_ts",
+            _wrote_ts,
+        )
+
+    def _watcher(_t_evo_start):
+        # Checks for new data every ~60s -- marimo's per-cell print
+        # capture would otherwise swallow this thread's logging, so the
+        # caller redirects stdout to sys.__stdout__ for the duration of
+        # this thread's lifetime.
+        try:
+            while True:
+                _stopped = _stop_event.wait(60.0)
+                _drain(_t_evo_start, "watcher")
+                if _stopped:
+                    break
+        except Exception as _e:  # noqa: BLE001 -- re-raised after join
+            _watcher_exc[0] = _e
+
+    # marimo captures each cell's stdout internally (buffering it into the
+    # exported notebook rather than passing it through to the real
+    # terminal), so the print()-based logging above wouldn't otherwise be
+    # visible while a long SLURM job is running. Redirecting to
+    # sys.__stdout__ (the original stream, saved by Python at process
+    # startup, before marimo's capture takes over) sidesteps that.
+    _t_evo_start = time.time()
+    with contextlib.redirect_stdout(sys.__stdout__):
+        _thread = threading.Thread(
+            target=_watcher, args=(_t_evo_start,), daemon=True
+        )
+        _thread.start()
+        try:
+            _G, _B = _run_sswm(
+                _G0,
+                _B0,
+                training_set,
+                _K,
+                schedule,
+                LAM1,
+                LAM2,
+                _w1,
+                _w2,
+                _mask,
+                _seed,
+                SNAPSHOT_BLOCKS,
+                TIMESERIES_BLOCKS,
+                N_SCORE,
+                _G_snap,
+                _B_snap,
+                _B_trace,
+                _progress_counts,
+            )
+        finally:
+            _stop_event.set()
+            _thread.join()
+        if _watcher_exc[0] is not None:
+            raise _watcher_exc[0]
+        # The watcher's own final iteration (triggered by _stop_event
+        # above) already drains everything, but calling _drain() once
+        # more here -- synchronously, on the main thread, independent of
+        # the watcher thread's internal loop timing -- guarantees the
+        # complete run's data is on disk before this cell returns rather
+        # than relying solely on that thread's internal control flow.
+        # By this point _run_sswm has already returned, so there's
+        # nothing left to become available and this is a cheap no-op.
+        _drain(_t_evo_start, "final")
 
     FINAL_M = 100_000
     (
@@ -1134,112 +1468,35 @@ def run_trial(
 
     elapsed_sec = time.time() - _t0
 
-    # --- write the time series as a parquet file, filename self-describing
-    # via keyname.pack (every run option as a key=value segment, ending in
-    # ext=.pqt). Numeric option columns use the smallest dtype that safely
-    # covers their range -- pandas Categorical on a numeric/bool column gets
-    # silently unwrapped by to_parquet/read_parquet, but parquet's own
-    # RLE_DICTIONARY encoding compresses these low-cardinality columns
-    # automatically regardless, so the on-disk size benefit doesn't depend
-    # on the pandas dtype tag. replicate_uid is a genuine string, so
-    # Categorical is used there and round-trips correctly.
-    _run_params = {
-        "v": _v,
-        "seed": _seed,
-        "zeroinit": zero_init,
-        "l1scale": _w1,
-        "l2scale": _w2,
-        "blipfreq": blip_freq,
-        "numepoch": _K,
-        "schedulemode": schedule_mode,
-        "replicate": replicate_uid,
-    }
-
-    _n_rows = len(trace_gens)
-
-    def _bcast(value, dtype):
-        return np.full(_n_rows, value, dtype=dtype)
-
-    # Per-class fraction columns (share of _TRACE_M samples landing exactly
-    # on each phenotype): test1_frac..test8_frac are the 8 CLASS_8 classes
-    # in order; train1_frac..train3_frac are the 3 of those 8 that are
-    # also unblipped training patterns (CLASS_8 indices 0, 3, 6 -- S1, S2,
-    # S3), duplicated under their own names for self-documenting clarity
-    # even though train{i}_frac == test{1,4,7}_frac by construction.
-    _test_frac_cols = {
-        f"test{_j + 1}_frac": (_class_counts_arr[:, _j] / _TRACE_M).astype(
-            np.float32
-        )
-        for _j in range(8)
-    }
-    _train_frac_cols = {
-        f"train{_j + 1}_frac": (_class_counts_arr[:, _tc] / _TRACE_M).astype(
-            np.float32
-        )
-        for _j, _tc in enumerate([0, 3, 6])
-    }
-    _blip_frac_cols = {
-        f"s{_j + 1}_blip_match_frac": (
-            _blip_counts_arr[:, _j] / _TRACE_M
-        ).astype(np.float32)
-        for _j in range(3)
-    }
-
-    trace_df = pd.DataFrame(
+    trace_df = pd.DataFrame(_trace_rows, columns=_trace_columns)
+    trace_df = trace_df.astype(
         {
-            "epoch": np.arange(_n_rows, dtype=np.uint16),
-            "generation": np.asarray(trace_gens, dtype=np.uint32),
-            "walltime_sec": np.asarray(trace_walltime, dtype=np.float32),
-            "pure_train_chi2": np.asarray(trace_pure_train, dtype=np.float32),
-            "test_chi2": np.asarray(trace_test, dtype=np.float32),
-            "blip_train_chi2": np.asarray(trace_blip_train, dtype=np.float32),
-            **_test_frac_cols,
-            **_train_frac_cols,
-            **_blip_frac_cols,
-            "other_frac": (_class_counts_arr[:, 8] / _TRACE_M).astype(
-                np.float32
-            ),
-            "other_chi2": np.asarray(trace_other_chi2, dtype=np.float32),
-            "other_n_classes": np.asarray(trace_n_other, dtype=np.uint32),
-            "l1_loss": np.asarray(trace_l1_loss, dtype=np.float32),
-            "l2_loss": np.asarray(trace_l2_loss, dtype=np.float32),
-            "regularization_loss": np.asarray(
-                trace_reg_loss, dtype=np.float32
-            ),
-            "v": _bcast(_v, np.uint8),
-            "seed": _bcast(_seed, np.uint32),
-            "zero_init": _bcast(zero_init, np.bool_),
-            "l1_scale": _bcast(_w1, np.float32),
-            "l2_scale": _bcast(_w2, np.float32),
-            "blip_freq": _bcast(blip_freq, np.float32),
-            "num_epoch": _bcast(_K, np.uint32),
-            "schedule_mode": pd.Categorical([schedule_mode] * _n_rows),
-            "replicate_uid": pd.Categorical([replicate_uid] * _n_rows),
+            "epoch": np.uint16,
+            "generation": np.uint32,
+            "walltime_sec": np.float32,
+            "pure_train_chi2": np.float32,
+            "test_chi2": np.float32,
+            "blip_train_chi2": np.float32,
+            **{f"test{_j + 1}_frac": np.float32 for _j in range(8)},
+            **{f"train{_j + 1}_frac": np.float32 for _j in range(3)},
+            **{f"s{_j + 1}_blip_match_frac": np.float32 for _j in range(3)},
+            "other_frac": np.float32,
+            "other_chi2": np.float32,
+            "other_n_classes": np.uint32,
+            "l1_loss": np.float32,
+            "l2_loss": np.float32,
+            "regularization_loss": np.float32,
+            "v": np.uint8,
+            "seed": np.uint32,
+            "zero_init": np.bool_,
+            "l1_scale": np.float32,
+            "l2_scale": np.float32,
+            "blip_freq": np.float32,
+            "num_epoch": np.uint32,
         }
     )
-    timeseries_path = f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'ext': '.pqt'})}"
-    trace_df.to_parquet(timeseries_path, compression="zstd", index=False)
-
-    # --- write G_snap and B_snap to separate npz key-value stores, each
-    # keyed by generation (zero-padded so keys sort lexicographically in
-    # the same order as chronologically). Snapshot points are the sparser
-    # SNAPSHOT_BLOCKS set, distinct from the denser TIMESERIES_BLOCKS set
-    # trace_gens is built from above.
-    _snapshot_gens = [int(_b) * _K for _b in SNAPSHOT_BLOCKS]
-    _G_store = {
-        f"gen{_g:012d}": _G_snap[_i] for _i, _g in enumerate(_snapshot_gens)
-    }
-    _B_store = {
-        f"gen{_g:012d}": _B_snap[_i] for _i, _g in enumerate(_snapshot_gens)
-    }
-    G_snapshots_path = (
-        f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'what': 'G', 'ext': '.npz'})}"
-    )
-    B_snapshots_path = (
-        f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'what': 'B', 'ext': '.npz'})}"
-    )
-    np.savez_compressed(G_snapshots_path, **_G_store)
-    np.savez_compressed(B_snapshots_path, **_B_store)
+    trace_df["schedule_mode"] = pd.Categorical(trace_df["schedule_mode"])
+    trace_df["replicate_uid"] = pd.Categorical(trace_df["replicate_uid"])
 
     _final_test_fracs = {
         f"test{_j + 1}_frac": float(final_class_counts[_j] / FINAL_M)
