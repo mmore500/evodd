@@ -1231,74 +1231,101 @@ def run_trial(
     _trace_rows = []
     _stop_event = threading.Event()
     _watcher_exc = [None]
+    _log_start = time.time()
+    # Shared, mutable drain progress -- a dict (rather than locals closed
+    # over by _watcher alone) so both the watcher thread's periodic polls
+    # and the guaranteed final drain call after it exits (see below) can
+    # resume from the same cursor.
+    _drain_state = {
+        "last_snap": 0,
+        "last_ts": 0,
+        "first_g": True,
+        "first_b": True,
+        "first_csv": True,
+    }
+
+    def _drain(_t_evo_start, _label):
+        # Reads progress_counts (published by the nogil njit call running
+        # concurrently on the main thread) and, if it has advanced,
+        # writes the newly-available snapshot/timeseries rows straight to
+        # disk. Every call logs the attempt; a second line logs the save
+        # only when one actually happens, so "checked, nothing new yet"
+        # and "wrote N rows" are distinguishable in the log.
+        _snap_n = int(_progress_counts[0])
+        _ts_n = int(_progress_counts[1])
+        print(
+            "poll-attempt",
+            replicate_uid,
+            "label",
+            _label,
+            "snap",
+            _snap_n,
+            "/",
+            _n_snap,
+            "ts",
+            _ts_n,
+            "/",
+            _n_ts,
+            "elapsed_sec",
+            int(time.time() - _log_start),
+        )
+        if (
+            _snap_n <= _drain_state["last_snap"]
+            and _ts_n <= _drain_state["last_ts"]
+        ):
+            return
+        # deliberate pause between observing that new rows are ready and
+        # actually reading + writing them, as an extra margin of safety
+        # on top of the publish-count-last ordering guarantee.
+        time.sleep(1.0)
+        _wrote_snap = 0
+        while _drain_state["last_snap"] < _snap_n:
+            _i = _drain_state["last_snap"]
+            _key = f"gen{int(_snapshot_gens[_i]):012d}"
+            append_npz_array(
+                G_snapshots_path, _key, _G_snap[_i], _drain_state["first_g"]
+            )
+            append_npz_array(
+                B_snapshots_path, _key, _B_snap[_i], _drain_state["first_b"]
+            )
+            _drain_state["first_g"] = False
+            _drain_state["first_b"] = False
+            _drain_state["last_snap"] += 1
+            _wrote_snap += 1
+        _wrote_ts = 0
+        while _drain_state["last_ts"] < _ts_n:
+            _i = _drain_state["last_ts"]
+            _row = _trace_row(_i, _t_evo_start)
+            _trace_rows.append(_row)
+            append_csv_row(
+                timeseries_path,
+                _row,
+                _trace_columns,
+                _drain_state["first_csv"],
+            )
+            _drain_state["first_csv"] = False
+            _drain_state["last_ts"] += 1
+            _wrote_ts += 1
+        print(
+            "saved",
+            replicate_uid,
+            "label",
+            _label,
+            "wrote_snap",
+            _wrote_snap,
+            "wrote_ts",
+            _wrote_ts,
+        )
 
     def _watcher(_t_evo_start):
-        # Polls progress_counts (published by the nogil njit call running
-        # concurrently on the main thread) every ~2s, draining any newly
-        # -available snapshot/timeseries rows to disk immediately. Also
-        # doubles as the progress heartbeat, logged at ~20s cadence using
-        # real wall-clock time -- marimo's per-cell print capture would
-        # otherwise swallow this, so the caller redirects stdout to
-        # sys.__stdout__ for the duration of this thread's lifetime.
-        _last_snap = 0
-        _last_ts = 0
-        _first_g = True
-        _first_b = True
-        _first_csv = True
-        _log_start = time.time()
-        _last_log = _log_start
+        # Checks for new data every ~60s -- marimo's per-cell print
+        # capture would otherwise swallow this thread's logging, so the
+        # caller redirects stdout to sys.__stdout__ for the duration of
+        # this thread's lifetime.
         try:
             while True:
-                _stopped = _stop_event.wait(2.0)
-                _snap_n = int(_progress_counts[0])
-                _ts_n = int(_progress_counts[1])
-                while _last_snap < _snap_n:
-                    _key = f"gen{int(_snapshot_gens[_last_snap]):012d}"
-                    append_npz_array(
-                        G_snapshots_path,
-                        _key,
-                        _G_snap[_last_snap],
-                        _first_g,
-                    )
-                    append_npz_array(
-                        B_snapshots_path,
-                        _key,
-                        _B_snap[_last_snap],
-                        _first_b,
-                    )
-                    _first_g = False
-                    _first_b = False
-                    _last_snap += 1
-                while _last_ts < _ts_n:
-                    _row = _trace_row(_last_ts, _t_evo_start)
-                    _trace_rows.append(_row)
-                    append_csv_row(
-                        timeseries_path, _row, _trace_columns, _first_csv
-                    )
-                    _first_csv = False
-                    _last_ts += 1
-                _now = time.time()
-                if _now - _last_log >= 20:
-                    _pct = (_ts_n * 100 // _n_ts) if _n_ts else 100
-                    print(
-                        "progress",
-                        replicate_uid,
-                        "seed",
-                        _seed,
-                        "snap",
-                        _snap_n,
-                        "/",
-                        _n_snap,
-                        "ts",
-                        _ts_n,
-                        "/",
-                        _n_ts,
-                        "pct",
-                        _pct,
-                        "elapsed_sec",
-                        int(_now - _log_start),
-                    )
-                    _last_log = _now
+                _stopped = _stop_event.wait(60.0)
+                _drain(_t_evo_start, "watcher")
                 if _stopped:
                     break
         except Exception as _e:  # noqa: BLE001 -- re-raised after join
@@ -1306,9 +1333,9 @@ def run_trial(
 
     # marimo captures each cell's stdout internally (buffering it into the
     # exported notebook rather than passing it through to the real
-    # terminal), so the print()-based progress heartbeat above wouldn't
-    # otherwise be visible while a long SLURM job is running. Redirecting
-    # to sys.__stdout__ (the original stream, saved by Python at process
+    # terminal), so the print()-based logging above wouldn't otherwise be
+    # visible while a long SLURM job is running. Redirecting to
+    # sys.__stdout__ (the original stream, saved by Python at process
     # startup, before marimo's capture takes over) sidesteps that.
     _t_evo_start = time.time()
     with contextlib.redirect_stdout(sys.__stdout__):
@@ -1342,6 +1369,15 @@ def run_trial(
             _thread.join()
         if _watcher_exc[0] is not None:
             raise _watcher_exc[0]
+        # The watcher's own final iteration (triggered by _stop_event
+        # above) already drains everything, but calling _drain() once
+        # more here -- synchronously, on the main thread, independent of
+        # the watcher thread's internal loop timing -- guarantees the
+        # complete run's data is on disk before this cell returns rather
+        # than relying solely on that thread's internal control flow.
+        # By this point _run_sswm has already returned, so there's
+        # nothing left to become available and this is a cheap no-op.
+        _drain(_t_evo_start, "final")
 
     FINAL_M = 100_000
     (
