@@ -9,10 +9,11 @@ def import_std():
     import builtins
     import contextlib
     import os
+    import sys
     import time
     import uuid
 
-    return builtins, contextlib, os, time, uuid
+    return builtins, contextlib, os, sys, time, uuid
 
 
 @app.cell
@@ -1053,13 +1054,13 @@ def run_trial(
     make_visible_mask,
     np,
     num_epoch,
-    os,
     pd,
     run_sswm_output_masked_scheduled_traced_ext_elastic,
     run_sswm_output_masked_scheduled_traced_zero_masked_elastic,
     schedule,
     schedule_mode,
     seed,
+    sys,
     time,
     training_set,
     uuid,
@@ -1082,17 +1083,10 @@ def run_trial(
     # exported notebook rather than passing it through to the real
     # terminal), so the print()-based progress heartbeats below wouldn't
     # otherwise be visible while a long SLURM job is running. Redirecting
-    # stdout to a real file for the duration of the run sidesteps that --
-    # the file can be tailed live to watch progress.
-    _progress_log_path = os.path.join(
-        OUTPUT_DIR, f"progress_{replicate_uid}.log"
-    )
-
+    # to sys.__stdout__ (the original stream, saved by Python at process
+    # startup, before marimo's capture takes over) sidesteps that.
     _t_evo_start = time.time()
-    with (
-        open(_progress_log_path, "w", buffering=1) as _progress_f,
-        contextlib.redirect_stdout(_progress_f),
-    ):
+    with contextlib.redirect_stdout(sys.__stdout__):
         if zero_init:
             (
                 _G,
