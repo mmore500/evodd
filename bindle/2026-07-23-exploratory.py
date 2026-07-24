@@ -1173,10 +1173,12 @@ def run_trial(
     # genuine line-at-a-time appends, unlike parquet), so a SLURM job
     # timeout only loses whatever was written since the last append
     # instead of the entire run's output; G/B snapshots are likewise
-    # appended to .npz files one array at a time. Once the run completes,
-    # trace_df is *also* written out as parquet (compact, and what the
-    # collation step downstream expects) -- see near the end of this
-    # cell, after trace_df is fully assembled.
+    # appended to .npz files one array at a time. Per-replicate output
+    # stays CSV -- the downstream collation step converts to parquet
+    # itself (joinem infers CSV input / parquet output from file
+    # extensions) once all replicates' timeseries are joined into one
+    # frame, rather than every replicate separately producing its own
+    # parquet file only to be re-read and re-written at collation time.
     _run_params = {
         "v": _v,
         "seed": _seed,
@@ -1188,12 +1190,7 @@ def run_trial(
         "schedulemode": schedule_mode,
         "replicate": replicate_uid,
     }
-    timeseries_csv_path = (
-        f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'ext': '.csv'})}"
-    )
-    timeseries_pqt_path = (
-        f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'ext': '.pqt'})}"
-    )
+    timeseries_path = f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'ext': '.csv'})}"
     G_snapshots_path = (
         f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'what': 'G', 'ext': '.npz'})}"
     )
@@ -1357,7 +1354,7 @@ def run_trial(
             _row = _trace_row(_i, _t_evo_start)
             _trace_rows.append(_row)
             append_csv_row(
-                timeseries_csv_path,
+                timeseries_path,
                 _row,
                 _trace_columns,
                 _drain_state["first_csv"],
@@ -1488,11 +1485,6 @@ def run_trial(
     trace_df["schedule_mode"] = pd.Categorical(trace_df["schedule_mode"])
     trace_df["replicate_uid"] = pd.Categorical(trace_df["replicate_uid"])
 
-    # written once the run is complete (unlike the progressive CSV above,
-    # parquet doesn't support cheap row-at-a-time appends) -- a compact
-    # final artifact, and what the downstream collation step expects.
-    trace_df.to_parquet(timeseries_pqt_path, compression="zstd", index=False)
-
     _final_test_fracs = {
         f"test{_j + 1}_frac": float(final_class_counts[_j] / FINAL_M)
         for _j in range(8)
@@ -1527,8 +1519,7 @@ def run_trial(
         "s3_blip_match_frac": s3_blip_match / FINAL_M,
         "elapsed_sec": elapsed_sec,
         "replicate_uid": replicate_uid,
-        "timeseries_csv_path": timeseries_csv_path,
-        "timeseries_pqt_path": timeseries_pqt_path,
+        "timeseries_path": timeseries_path,
         "G_snapshots_path": G_snapshots_path,
         "B_snapshots_path": B_snapshots_path,
     }
@@ -1559,8 +1550,7 @@ def show_timeseries_peek(pd, trace_df):
 @app.cell
 def show_output_files(os, pd, result):
     _paths = [
-        result["timeseries_csv_path"],
-        result["timeseries_pqt_path"],
+        result["timeseries_path"],
         result["G_snapshots_path"],
         result["B_snapshots_path"],
     ]

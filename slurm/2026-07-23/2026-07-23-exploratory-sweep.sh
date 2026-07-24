@@ -407,8 +407,13 @@ run_replicate() {
     # cell is what writes dd_trial_outputs/ --- so a "successful" export
     # with no outputs would otherwise sail through to >>>complete<<<.
     # Require both a non-trivial exported notebook and the run cell's
-    # parquet + npz outputs, else fail the replicate (return 1, caught by
-    # the wait loop below).
+    # csv + npz outputs, else fail the replicate (return 1, caught by
+    # the wait loop below). Timeseries output is CSV, not parquet ---
+    # written progressively during the run so a SLURM timeout still
+    # leaves partial data on disk --- and gets converted to parquet only
+    # at collation time (joinem infers CSV in / parquet out from the
+    # file extensions), rather than every replicate separately producing
+    # its own parquet file.
     local nb_out="\${repdir}/${NOTEBOOK_NAME}.ipynb"
     local outdata_dir="\${repdir}/dd_trial_outputs"
     local nb_bytes
@@ -417,10 +422,10 @@ run_replicate() {
         echo "ERROR [gid=\${gid}]: exported notebook \${nb_out} missing or trivial (\${nb_bytes} bytes)"
         return 1
     fi
-    local n_pqt
-    n_pqt=\$(find "\${outdata_dir}" -maxdepth 1 -name '*ext=.pqt' 2>/dev/null | wc -l)
-    if [ "\${n_pqt}" -lt 1 ]; then
-        echo "ERROR [gid=\${gid}]: no timeseries parquet under \${outdata_dir}"
+    local n_csv
+    n_csv=\$(find "\${outdata_dir}" -maxdepth 1 -name '*ext=.csv' 2>/dev/null | wc -l)
+    if [ "\${n_csv}" -lt 1 ]; then
+        echo "ERROR [gid=\${gid}]: no timeseries csv under \${outdata_dir}"
         return 1
     fi
     local n_npz
@@ -429,7 +434,7 @@ run_replicate() {
         echo "ERROR [gid=\${gid}]: expected 2 (G, B) snapshot npz files under \${outdata_dir}, found \${n_npz}"
         return 1
     fi
-    echo "  [gid=\${gid}] export OK: \${nb_bytes} byte notebook, \${n_pqt} parquet + \${n_npz} npz in dd_trial_outputs"
+    echo "  [gid=\${gid}] export OK: \${nb_bytes} byte notebook, \${n_csv} csv + \${n_npz} npz in dd_trial_outputs"
 }
 
 echo "do work (CHUNK=${CHUNK} replicates concurrently) ------------ \${SECONDS}"
@@ -509,16 +514,20 @@ pushd "${BATCHDIR}/.."
     "\$(basename "${BATCHDIR}")"/__*
 popd
 
-echo "   - join per-replicate timeseries parquets across all conditions"
-# Each replicate writes one self-describing timeseries parquet (v, seed,
+echo "   - join per-replicate timeseries csvs across all conditions, as parquet"
+# Each replicate writes one self-describing timeseries csv (v, seed,
 # zeroinit, l1scale, l2scale, blipfreq, numepoch, replicate columns
 # stamped by the notebook's run cell) under r<gid>/dd_trial_outputs/, so a
 # straight concatenation yields a collated frame spanning the whole sweep.
-# The G/B snapshot npz stores are NOT tabular (they're keyed arrays), so
-# they aren't joined here -- they ride along in the jobarchive tarball
-# above instead.
+# Per-replicate output is CSV (written progressively during the run, so a
+# SLURM timeout still leaves partial data on disk) rather than parquet;
+# joinem infers CSV input / parquet output from the file extensions
+# below, so the conversion to parquet happens once here rather than once
+# per replicate. The G/B snapshot npz stores are NOT tabular (they're
+# keyed arrays), so they aren't joined here -- they ride along in the
+# jobarchive tarball above instead.
 out_path="${BATCHDIR_JOBRESULT}/a=trace+date=${JOBDATE}+job=${JOBNAME}+ext=.pqt"
-ls -1 "${BATCHDIR}"/__*/**/dd_trial_outputs/*ext=.pqt 2>/dev/null \
+ls -1 "${BATCHDIR}"/__*/**/dd_trial_outputs/*ext=.csv 2>/dev/null \
     | tee /dev/stderr \
     | python3.10 -m joinem --progress "\${out_path}" \
     || echo "no timeseries files to join"
