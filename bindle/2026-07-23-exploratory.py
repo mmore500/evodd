@@ -409,10 +409,12 @@ def masked_model_core(
             )
             _, pattern_counts = np.unique(pattern_ids, return_counts=True)
             other_chi2 = chi_squared(pattern_counts, other_signs.shape[0])
+            n_other_classes = int(pattern_counts.shape[0])
         else:
             other_chi2 = float("nan")
+            n_other_classes = 0
 
-        return counts, other_chi2
+        return counts, other_chi2, n_other_classes
 
     return (
         classify_by_phenotype_output_masked,
@@ -548,9 +550,11 @@ def masked_model_ext_elastic(
         # class_counts is length 9: CLASS_8 classes 1..8 (indices 0..7,
         # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3) plus
         # "other" (index 8, matches none of the 8 canonical classes).
-        class_counts, other_chi2 = classify_by_phenotype_output_masked(
-            Pa_scored
-        )
+        (
+            class_counts,
+            other_chi2,
+            n_other_classes,
+        ) = classify_by_phenotype_output_masked(Pa_scored)
         train_counts = class_counts[[0, 3, 6]]
         blip_counts = classify_exact_counts(Pa_folded, BLIP_SET)
         return (
@@ -560,6 +564,7 @@ def masked_model_ext_elastic(
             class_counts,
             blip_counts,
             other_chi2,
+            n_other_classes,
         )
 
     return (
@@ -694,9 +699,11 @@ def masked_model_zero_masked_elastic(
         # class_counts is length 9: CLASS_8 classes 1..8 (indices 0..7,
         # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3) plus
         # "other" (index 8, matches none of the 8 canonical classes).
-        class_counts, other_chi2 = classify_by_phenotype_output_masked(
-            Pa_scored
-        )
+        (
+            class_counts,
+            other_chi2,
+            n_other_classes,
+        ) = classify_by_phenotype_output_masked(Pa_scored)
         train_counts = class_counts[[0, 3, 6]]
         blip_counts = classify_exact_counts(Pa_folded, BLIP_SET)
         return (
@@ -706,6 +713,7 @@ def masked_model_zero_masked_elastic(
             class_counts,
             blip_counts,
             other_chi2,
+            n_other_classes,
         )
 
     return (
@@ -965,7 +973,9 @@ def run_trial(
     compute_errors_output_masked_ext,
     compute_errors_output_masked_zero_masked,
     kn,
+    l1_cost,
     l1_scale,
+    l2_cost,
     l2_scale,
     make_visible_mask,
     np,
@@ -1074,9 +1084,17 @@ def run_trial(
         [],
         [],
     )
-    trace_class_counts, trace_blip_counts = [], []
+    trace_class_counts, trace_blip_counts, trace_n_other = [], [], []
+    # L1/L2/regularization loss depend only on B (not on sampled genotypes),
+    # so they're computed directly here rather than threaded through
+    # _errors_fn. l1_loss/l2_loss are the raw, unweighted per-entry-mean
+    # costs -- recorded regardless of how l1_scale/l2_scale are configured
+    # for this replicate -- while regularization_loss is the actual
+    # weighted penalty subtracted from benefit in the fitness function
+    # driving evolution (w1 * LAM1 * l1_cost(B) + w2 * LAM2 * l2_cost(B)).
+    trace_l1_loss, trace_l2_loss, trace_reg_loss = [], [], []
     for _i in range(_n_ts):
-        _ptr, _te, _btr, _cc, _bc, _oc = _errors_fn(
+        _ptr, _te, _btr, _cc, _bc, _oc, _noc = _errors_fn(
             _B_trace[_i], _seed + 2000, _TRACE_M
         )
         trace_pure_train.append(_ptr)
@@ -1085,6 +1103,12 @@ def run_trial(
         trace_class_counts.append(_cc)
         trace_blip_counts.append(_bc)
         trace_other_chi2.append(_oc)
+        trace_n_other.append(_noc)
+        _l1 = l1_cost(_B_trace[_i])
+        _l2 = l2_cost(_B_trace[_i])
+        trace_l1_loss.append(_l1)
+        trace_l2_loss.append(_l2)
+        trace_reg_loss.append(_w1 * LAM1 * _l1 + _w2 * LAM2 * _l2)
     # class_counts: (n_rows, 9) -- CLASS_8 classes 1..8 then "other".
     # blip_counts: (n_rows, 3) -- S1b, S2b, S3b exact-match counts.
     _class_counts_arr = np.asarray(trace_class_counts)
@@ -1098,8 +1122,12 @@ def run_trial(
         final_class_counts,
         final_blip_counts,
         final_other_chi2,
+        final_n_other_classes,
     ) = _errors_fn(_B, _seed + 1000, FINAL_M)
     assert final_class_counts.sum() == FINAL_M
+    final_l1_loss = l1_cost(_B)
+    final_l2_loss = l2_cost(_B)
+    final_reg_loss = _w1 * LAM1 * final_l1_loss + _w2 * LAM2 * final_l2_loss
     s1_blip_match, s2_blip_match, s3_blip_match = (
         int(_c) for _c in final_blip_counts
     )
@@ -1172,6 +1200,12 @@ def run_trial(
                 np.float32
             ),
             "other_chi2": np.asarray(trace_other_chi2, dtype=np.float32),
+            "other_n_classes": np.asarray(trace_n_other, dtype=np.uint32),
+            "l1_loss": np.asarray(trace_l1_loss, dtype=np.float32),
+            "l2_loss": np.asarray(trace_l2_loss, dtype=np.float32),
+            "regularization_loss": np.asarray(
+                trace_reg_loss, dtype=np.float32
+            ),
             "v": _bcast(_v, np.uint8),
             "seed": _bcast(_seed, np.uint32),
             "zero_init": _bcast(zero_init, np.bool_),
@@ -1232,6 +1266,10 @@ def run_trial(
         **_final_train_fracs,
         "other_frac": float(final_class_counts[8] / FINAL_M),
         "other_chi2": final_other_chi2,
+        "other_n_classes": final_n_other_classes,
+        "l1_loss": final_l1_loss,
+        "l2_loss": final_l2_loss,
+        "regularization_loss": final_reg_loss,
         "s1_blip_match_frac": s1_blip_match / FINAL_M,
         "s2_blip_match_frac": s2_blip_match / FINAL_M,
         "s3_blip_match_frac": s3_blip_match / FINAL_M,
