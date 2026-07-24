@@ -6,6 +6,7 @@ app = marimo.App(width="full")
 
 @app.cell
 def import_std():
+    import builtins
     import contextlib
     import os
     import sys
@@ -14,7 +15,7 @@ def import_std():
     import uuid
     import zipfile
 
-    return contextlib, os, sys, threading, time, uuid, zipfile
+    return builtins, contextlib, os, sys, threading, time, uuid, zipfile
 
 
 @app.cell
@@ -429,6 +430,7 @@ def masked_model_core(
 def masked_model_ext_elastic(
     BLIP_SET,
     benefit,
+    builtins,
     chi_squared,
     classify_by_phenotype_output_masked,
     classify_exact_counts,
@@ -442,6 +444,12 @@ def masked_model_ext_elastic(
     np,
     sample_G,
 ):
+    # marimo shadows the builtin `print` within each cell with its own
+    # output-capturing wrapper, which numba's nopython mode can't type --
+    # capture the real builtins.print here so the njit progress heartbeat
+    # below can reference a supported callable via closure.
+    _print = builtins.print
+
     @njit(fastmath=True)
     def fitness_output_masked_ext_elastic(
         G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
@@ -462,7 +470,9 @@ def masked_model_ext_elastic(
     # snapshot/timeseries rows are safe to read -- the count is only
     # bumped *after* the corresponding row is fully written, so a watcher
     # thread that only reads indices below the last-seen count never
-    # observes a partial row.
+    # observes a partial row. numba's print() internally reacquires the
+    # GIL for the duration of the call (see numba.cpython.printimpl), so
+    # it's safe to call here despite nogil=True.
     @njit(nogil=True)
     def run_sswm_output_masked_scheduled_traced_ext_elastic(
         G0,
@@ -501,6 +511,16 @@ def masked_model_ext_elastic(
         snap_ptr = 0
         ts_ptr = 0
 
+        # Additional heartbeat directly from inside the loop, independent
+        # of the caller's watcher thread -- numba's nopython mode doesn't
+        # support time.time() (only plain print() with comma-separated
+        # args), so approximate a ~20s cadence using the benchmarked
+        # single-threaded throughput of this loop (~83,000 gens/sec on
+        # non-cluster hardware) converted to a generation-count interval.
+        # Actual cadence scales with real hardware speed -- this is a
+        # "job is still alive" signal, not a precise timer.
+        LOG_EVERY_GENS = 1_660_000
+
         if snap_ptr < n_snap_pts and snapshot_blocks[snap_ptr] == 0:
             G_snap[snap_idx] = G
             B_snap[snap_idx] = B
@@ -528,6 +548,19 @@ def masked_model_ext_elastic(
             if fp > f:
                 G = Gp
                 B = Bp
+
+            if (gen + 1) % LOG_EVERY_GENS == 0:
+                _print(
+                    "njit-heartbeat",
+                    "seed",
+                    seed,
+                    "gen",
+                    gen + 1,
+                    "/",
+                    total_gens,
+                    "pct",
+                    (gen + 1) * 100 // total_gens,
+                )
 
             if (gen + 1) % K == 0:
                 completed_block = (gen + 1) // K
@@ -589,6 +622,7 @@ def masked_model_ext_elastic(
 def masked_model_zero_masked_elastic(
     BLIP_SET,
     benefit,
+    builtins,
     chi_squared,
     classify_by_phenotype_output_masked,
     classify_exact_counts,
@@ -602,6 +636,12 @@ def masked_model_zero_masked_elastic(
     np,
     sample_G,
 ):
+    # marimo shadows the builtin `print` within each cell with its own
+    # output-capturing wrapper, which numba's nopython mode can't type --
+    # capture the real builtins.print here so the njit progress heartbeat
+    # below can reference a supported callable via closure.
+    _print = builtins.print
+
     @njit(fastmath=True)
     def fitness_output_masked_zero_masked_elastic(
         G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
@@ -622,7 +662,9 @@ def masked_model_zero_masked_elastic(
     # snapshot/timeseries rows are safe to read -- the count is only
     # bumped *after* the corresponding row is fully written, so a watcher
     # thread that only reads indices below the last-seen count never
-    # observes a partial row.
+    # observes a partial row. numba's print() internally reacquires the
+    # GIL for the duration of the call (see numba.cpython.printimpl), so
+    # it's safe to call here despite nogil=True.
     @njit(nogil=True)
     def run_sswm_output_masked_scheduled_traced_zero_masked_elastic(
         G0,
@@ -661,6 +703,16 @@ def masked_model_zero_masked_elastic(
         snap_ptr = 0
         ts_ptr = 0
 
+        # Additional heartbeat directly from inside the loop, independent
+        # of the caller's watcher thread -- numba's nopython mode doesn't
+        # support time.time() (only plain print() with comma-separated
+        # args), so approximate a ~20s cadence using the benchmarked
+        # single-threaded throughput of this loop (~83,000 gens/sec on
+        # non-cluster hardware) converted to a generation-count interval.
+        # Actual cadence scales with real hardware speed -- this is a
+        # "job is still alive" signal, not a precise timer.
+        LOG_EVERY_GENS = 1_660_000
+
         if snap_ptr < n_snap_pts and snapshot_blocks[snap_ptr] == 0:
             G_snap[snap_idx] = G
             B_snap[snap_idx] = B
@@ -688,6 +740,19 @@ def masked_model_zero_masked_elastic(
             if fp > f:
                 G = Gp
                 B = Bp
+
+            if (gen + 1) % LOG_EVERY_GENS == 0:
+                _print(
+                    "njit-heartbeat",
+                    "seed",
+                    seed,
+                    "gen",
+                    gen + 1,
+                    "/",
+                    total_gens,
+                    "pct",
+                    (gen + 1) * 100 // total_gens,
+                )
 
             if (gen + 1) % K == 0:
                 completed_block = (gen + 1) // K
@@ -1103,13 +1168,15 @@ def run_trial(
     _progress_counts = np.zeros(2, dtype=np.int64)
 
     # --- output paths, self-describing via keyname.pack (every run option
-    # as a key=value segment). Timeseries rows go to CSV (not parquet)
-    # because CSV supports genuine line-at-a-time appends; G/B snapshots
-    # go to .npz files appended one array at a time. Both are written
-    # progressively below as each row/array becomes available during the
-    # run, rather than once at the end, so a SLURM job timeout only loses
-    # whatever was written since the last append instead of the entire
-    # run's output.
+    # as a key=value segment). Timeseries rows are written progressively
+    # to CSV as each row becomes available during the run (CSV supports
+    # genuine line-at-a-time appends, unlike parquet), so a SLURM job
+    # timeout only loses whatever was written since the last append
+    # instead of the entire run's output; G/B snapshots are likewise
+    # appended to .npz files one array at a time. Once the run completes,
+    # trace_df is *also* written out as parquet (compact, and what the
+    # collation step downstream expects) -- see near the end of this
+    # cell, after trace_df is fully assembled.
     _run_params = {
         "v": _v,
         "seed": _seed,
@@ -1121,7 +1188,12 @@ def run_trial(
         "schedulemode": schedule_mode,
         "replicate": replicate_uid,
     }
-    timeseries_path = f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'ext': '.csv'})}"
+    timeseries_csv_path = (
+        f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'ext': '.csv'})}"
+    )
+    timeseries_pqt_path = (
+        f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'ext': '.pqt'})}"
+    )
     G_snapshots_path = (
         f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'what': 'G', 'ext': '.npz'})}"
     )
@@ -1285,7 +1357,7 @@ def run_trial(
             _row = _trace_row(_i, _t_evo_start)
             _trace_rows.append(_row)
             append_csv_row(
-                timeseries_path,
+                timeseries_csv_path,
                 _row,
                 _trace_columns,
                 _drain_state["first_csv"],
@@ -1416,6 +1488,11 @@ def run_trial(
     trace_df["schedule_mode"] = pd.Categorical(trace_df["schedule_mode"])
     trace_df["replicate_uid"] = pd.Categorical(trace_df["replicate_uid"])
 
+    # written once the run is complete (unlike the progressive CSV above,
+    # parquet doesn't support cheap row-at-a-time appends) -- a compact
+    # final artifact, and what the downstream collation step expects.
+    trace_df.to_parquet(timeseries_pqt_path, compression="zstd", index=False)
+
     _final_test_fracs = {
         f"test{_j + 1}_frac": float(final_class_counts[_j] / FINAL_M)
         for _j in range(8)
@@ -1450,7 +1527,8 @@ def run_trial(
         "s3_blip_match_frac": s3_blip_match / FINAL_M,
         "elapsed_sec": elapsed_sec,
         "replicate_uid": replicate_uid,
-        "timeseries_path": timeseries_path,
+        "timeseries_csv_path": timeseries_csv_path,
+        "timeseries_pqt_path": timeseries_pqt_path,
         "G_snapshots_path": G_snapshots_path,
         "B_snapshots_path": B_snapshots_path,
     }
@@ -1481,7 +1559,8 @@ def show_timeseries_peek(pd, trace_df):
 @app.cell
 def show_output_files(os, pd, result):
     _paths = [
-        result["timeseries_path"],
+        result["timeseries_csv_path"],
+        result["timeseries_pqt_path"],
         result["G_snapshots_path"],
         result["B_snapshots_path"],
     ]
