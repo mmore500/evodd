@@ -883,7 +883,7 @@ def model_constants(np, os):
     N_TOTAL = 20
     TOTAL_BLOCKS = 3600
     N_SNAPSHOT_TARGET = 100
-    N_TIMESERIES_TARGET = 10_000
+    N_TIMESERIES_TARGET = 1_000
     OUTPUT_DIR = "dd_trial_outputs"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     # standard 16-gene interleaved order, then the 4 extra hidden genes appended --
