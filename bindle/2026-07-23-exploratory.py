@@ -335,7 +335,9 @@ def delimit_masked_model(mo):
 
 
 @app.cell
-def masked_model_core(CLASS_8, N, develop, fold_to_canonical, njit, np, qmc):
+def masked_model_core(
+    CLASS_8, N, chi_squared, develop, fold_to_canonical, njit, np, qmc
+):
     def make_visible_mask(v, n, perm):
         mask = np.zeros(n, dtype=np.bool_)
         mask[perm[:v]] = True
@@ -372,22 +374,6 @@ def masked_model_core(CLASS_8, N, develop, fold_to_canonical, njit, np, qmc):
             Pa[k] = develop_output_masked(G_batch[k], B, visible_mask)
         return Pa
 
-    def classify_priority_groups_output_masked(Pa_batch):
-        Pa_folded = fold_to_canonical(Pa_batch)
-        signs = np.sign(Pa_folded)
-        dots = signs @ CLASS_8.T
-        match = dots == N
-        train_cols = [0, 3, 6]
-        other_cols = [1, 2, 4, 5, 7]
-        is_training = match[:, train_cols].any(axis=1)
-        is_other_test = match[:, other_cols].any(axis=1) & ~is_training
-        is_other = ~is_training & ~is_other_test
-        return (
-            int(is_training.sum()),
-            int(is_other_test.sum()),
-            int(is_other.sum()),
-        )
-
     def classify_by_phenotype_output_masked(Pa_batch):
         Pa_folded = fold_to_canonical(Pa_batch)
         k = CLASS_8.shape[0]
@@ -407,11 +393,29 @@ def masked_model_core(CLASS_8, N, develop, fold_to_canonical, njit, np, qmc):
         counts = np.zeros(k + 1, dtype=np.int64)
         for col in range(k + 1):
             counts[col] = int((assigned == col).sum())
-        return counts
+
+        # chi-squared evenness of the phenotype distribution *within* the
+        # "other" bucket (still_open: samples matching none of the 8
+        # canonical classes) -- bit-pack each such sample's sign pattern
+        # into an integer id, tally occurrences of each distinct pattern
+        # actually observed, and score how evenly those occurrences are
+        # spread (0 = perfectly even across whatever distinct patterns
+        # were observed). NaN when "other" is empty -- nothing to measure.
+        other_signs = signs[still_open]
+        if other_signs.shape[0] > 0:
+            bits = (other_signs > 0).astype(np.int64)
+            pattern_ids = bits @ (
+                1 << np.arange(bits.shape[1], dtype=np.int64)
+            )
+            _, pattern_counts = np.unique(pattern_ids, return_counts=True)
+            other_chi2 = chi_squared(pattern_counts, other_signs.shape[0])
+        else:
+            other_chi2 = float("nan")
+
+        return counts, other_chi2
 
     return (
         classify_by_phenotype_output_masked,
-        classify_priority_groups_output_masked,
         develop_batch_output_masked,
         develop_output_masked,
         develop_output_masked_zero_masked,
@@ -422,10 +426,10 @@ def masked_model_core(CLASS_8, N, develop, fold_to_canonical, njit, np, qmc):
 
 @app.cell
 def masked_model_ext_elastic(
-    CLASS_8,
-    TRAINING_SET,
+    BLIP_SET,
     benefit,
     chi_squared,
+    classify_by_phenotype_output_masked,
     classify_exact_counts,
     develop_batch_output_masked,
     develop_output_masked,
@@ -539,13 +543,23 @@ def masked_model_ext_elastic(
         n_total = B.shape[0]
         G_batch = sample_G(M, seed, n=n_total)
         Pa_batch = develop_batch_output_masked(G_batch, B, visible_mask)
-        Pa_folded = fold_to_canonical(Pa_batch[:, :n_score])
-        train_counts = classify_exact_counts(Pa_folded, TRAINING_SET)
-        test_counts = classify_exact_counts(Pa_folded, CLASS_8)
+        Pa_scored = Pa_batch[:, :n_score]
+        Pa_folded = fold_to_canonical(Pa_scored)
+        # class_counts is length 9: CLASS_8 classes 1..8 (indices 0..7,
+        # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3) plus
+        # "other" (index 8, matches none of the 8 canonical classes).
+        class_counts, other_chi2 = classify_by_phenotype_output_masked(
+            Pa_scored
+        )
+        train_counts = class_counts[[0, 3, 6]]
+        blip_counts = classify_exact_counts(Pa_folded, BLIP_SET)
         return (
             chi_squared(train_counts, M),
-            chi_squared(test_counts, M),
-            test_counts,
+            chi_squared(class_counts[:8], M),
+            chi_squared(blip_counts, M),
+            class_counts,
+            blip_counts,
+            other_chi2,
         )
 
     return (
@@ -556,10 +570,10 @@ def masked_model_ext_elastic(
 
 @app.cell
 def masked_model_zero_masked_elastic(
-    CLASS_8,
-    TRAINING_SET,
+    BLIP_SET,
     benefit,
     chi_squared,
+    classify_by_phenotype_output_masked,
     classify_exact_counts,
     develop_batch_output_masked,
     develop_output_masked_zero_masked,
@@ -675,13 +689,23 @@ def masked_model_zero_masked_elastic(
         G_batch = G_batch.copy()
         G_batch[:, ~visible_mask] = 0.0
         Pa_batch = develop_batch_output_masked(G_batch, B, visible_mask)
-        Pa_folded = fold_to_canonical(Pa_batch[:, :n_score])
-        train_counts = classify_exact_counts(Pa_folded, TRAINING_SET)
-        test_counts = classify_exact_counts(Pa_folded, CLASS_8)
+        Pa_scored = Pa_batch[:, :n_score]
+        Pa_folded = fold_to_canonical(Pa_scored)
+        # class_counts is length 9: CLASS_8 classes 1..8 (indices 0..7,
+        # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3) plus
+        # "other" (index 8, matches none of the 8 canonical classes).
+        class_counts, other_chi2 = classify_by_phenotype_output_masked(
+            Pa_scored
+        )
+        train_counts = class_counts[[0, 3, 6]]
+        blip_counts = classify_exact_counts(Pa_folded, BLIP_SET)
         return (
             chi_squared(train_counts, M),
-            chi_squared(test_counts, M),
-            test_counts,
+            chi_squared(class_counts[:8], M),
+            chi_squared(blip_counts, M),
+            class_counts,
+            blip_counts,
+            other_chi2,
         )
 
     return (
@@ -799,6 +823,7 @@ def build_schedule(
 
     S1b, S2b, S3b = make_blips()
     training_set = np.vstack([TRAINING_SET.astype(np.float64), S1b, S2b, S3b])
+    BLIP_SET = np.stack([S1b, S2b, S3b])
 
     # blip_freq = blip:true pattern-count ratio (0.66 reproduces this project's
     # established "blip66" condition: [723,723,723,477,477,477]). 3 equal true
@@ -817,7 +842,7 @@ def build_schedule(
         blip_counts, schedule_mode=schedule_mode, rng=_rng
     )
     assert schedule.shape[0] == TOTAL_BLOCKS
-    return S1b, S2b, S3b, blip_counts, schedule, training_set
+    return BLIP_SET, S1b, S2b, S3b, blip_counts, schedule, training_set
 
 
 @app.cell
@@ -934,19 +959,11 @@ def run_trial(
     N_SCORE,
     N_TOTAL,
     OUTPUT_DIR,
-    S1b,
-    S2b,
-    S3b,
     SNAPSHOT_BLOCKS,
     TIMESERIES_BLOCKS,
     blip_freq,
-    classify_by_phenotype_output_masked,
-    classify_exact_counts,
-    classify_priority_groups_output_masked,
     compute_errors_output_masked_ext,
     compute_errors_output_masked_zero_masked,
-    develop_batch_output_masked,
-    fold_to_canonical,
     kn,
     l1_scale,
     l2_scale,
@@ -956,7 +973,6 @@ def run_trial(
     pd,
     run_sswm_output_masked_scheduled_traced_ext_elastic,
     run_sswm_output_masked_scheduled_traced_zero_masked_elastic,
-    sample_G,
     schedule,
     schedule_mode,
     seed,
@@ -1044,43 +1060,49 @@ def run_trial(
     # (a reasonable estimate since SSWM's cost is ~constant per generation).
     _sswm_wall = time.time() - _t_evo_start
 
+    # M for the (dense, ~thousands of points) per-timepoint trace calls --
+    # kept small relative to FINAL_M below since it's paid many times over.
+    _TRACE_M = 2000
+
     _n_ts = _B_trace.shape[0]
     trace_gens = [int(_b) * _K for _b in TIMESERIES_BLOCKS]
     _total_gens = trace_gens[-1] if trace_gens[-1] > 0 else 1
     trace_walltime = [_sswm_wall * (g / _total_gens) for g in trace_gens]
-    trace_train, trace_test = [], []
+    trace_pure_train, trace_test, trace_blip_train, trace_other_chi2 = (
+        [],
+        [],
+        [],
+        [],
+    )
+    trace_class_counts, trace_blip_counts = [], []
     for _i in range(_n_ts):
-        _tr, _te, _ = _errors_fn(_B_trace[_i], _seed + 2000, 2000)
-        trace_train.append(_tr)
+        _ptr, _te, _btr, _cc, _bc, _oc = _errors_fn(
+            _B_trace[_i], _seed + 2000, _TRACE_M
+        )
+        trace_pure_train.append(_ptr)
         trace_test.append(_te)
+        trace_blip_train.append(_btr)
+        trace_class_counts.append(_cc)
+        trace_blip_counts.append(_bc)
+        trace_other_chi2.append(_oc)
+    # class_counts: (n_rows, 9) -- CLASS_8 classes 1..8 then "other".
+    # blip_counts: (n_rows, 3) -- S1b, S2b, S3b exact-match counts.
+    _class_counts_arr = np.asarray(trace_class_counts)
+    _blip_counts_arr = np.asarray(trace_blip_counts)
 
     FINAL_M = 100_000
-    train_chi2, test_chi2, _ = _errors_fn(_B, _seed + 1000, FINAL_M)
-
-    _G_batch = sample_G(FINAL_M, seed=_seed + 1000, n=N_TOTAL)
-    if zero_init:
-        _G_batch = _G_batch.copy()
-        _G_batch[:, ~_mask] = 0.0
-    _Pa_batch_full = develop_batch_output_masked(_G_batch, _B, _mask)
-    _Pa_batch = _Pa_batch_full[:, :N_SCORE]
-    _Pa_folded = fold_to_canonical(_Pa_batch)
-    s1_blip_match = int(
-        classify_exact_counts(_Pa_folded, S1b.reshape(1, -1))[0]
-    )
-    s2_blip_match = int(
-        classify_exact_counts(_Pa_folded, S2b.reshape(1, -1))[0]
-    )
-    s3_blip_match = int(
-        classify_exact_counts(_Pa_folded, S3b.reshape(1, -1))[0]
-    )
     (
-        training_ct,
-        other_test_ct,
-        other_ct,
-    ) = classify_priority_groups_output_masked(_Pa_batch)
-    assert training_ct + other_test_ct + other_ct == FINAL_M
-    phenotype_counts = classify_by_phenotype_output_masked(_Pa_batch)
-    assert phenotype_counts.sum() == FINAL_M
+        pure_train_chi2,
+        test_chi2,
+        blip_train_chi2,
+        final_class_counts,
+        final_blip_counts,
+        final_other_chi2,
+    ) = _errors_fn(_B, _seed + 1000, FINAL_M)
+    assert final_class_counts.sum() == FINAL_M
+    s1_blip_match, s2_blip_match, s3_blip_match = (
+        int(_c) for _c in final_blip_counts
+    )
 
     elapsed_sec = time.time() - _t0
 
@@ -1110,13 +1132,46 @@ def run_trial(
     def _bcast(value, dtype):
         return np.full(_n_rows, value, dtype=dtype)
 
+    # Per-class fraction columns (share of _TRACE_M samples landing exactly
+    # on each phenotype): test1_frac..test8_frac are the 8 CLASS_8 classes
+    # in order; train1_frac..train3_frac are the 3 of those 8 that are
+    # also unblipped training patterns (CLASS_8 indices 0, 3, 6 -- S1, S2,
+    # S3), duplicated under their own names for self-documenting clarity
+    # even though train{i}_frac == test{1,4,7}_frac by construction.
+    _test_frac_cols = {
+        f"test{_j + 1}_frac": (_class_counts_arr[:, _j] / _TRACE_M).astype(
+            np.float32
+        )
+        for _j in range(8)
+    }
+    _train_frac_cols = {
+        f"train{_j + 1}_frac": (_class_counts_arr[:, _tc] / _TRACE_M).astype(
+            np.float32
+        )
+        for _j, _tc in enumerate([0, 3, 6])
+    }
+    _blip_frac_cols = {
+        f"s{_j + 1}_blip_match_frac": (
+            _blip_counts_arr[:, _j] / _TRACE_M
+        ).astype(np.float32)
+        for _j in range(3)
+    }
+
     trace_df = pd.DataFrame(
         {
             "epoch": np.arange(_n_rows, dtype=np.uint16),
             "generation": np.asarray(trace_gens, dtype=np.uint32),
             "walltime_sec": np.asarray(trace_walltime, dtype=np.float32),
-            "train_chi2": np.asarray(trace_train, dtype=np.float32),
+            "pure_train_chi2": np.asarray(trace_pure_train, dtype=np.float32),
             "test_chi2": np.asarray(trace_test, dtype=np.float32),
+            "blip_train_chi2": np.asarray(trace_blip_train, dtype=np.float32),
+            **_test_frac_cols,
+            **_train_frac_cols,
+            **_blip_frac_cols,
+            "other_frac": (_class_counts_arr[:, 8] / _TRACE_M).astype(
+                np.float32
+            ),
+            "other_chi2": np.asarray(trace_other_chi2, dtype=np.float32),
             "v": _bcast(_v, np.uint8),
             "seed": _bcast(_seed, np.uint32),
             "zero_init": _bcast(zero_init, np.bool_),
@@ -1152,6 +1207,15 @@ def run_trial(
     np.savez_compressed(G_snapshots_path, **_G_store)
     np.savez_compressed(B_snapshots_path, **_B_store)
 
+    _final_test_fracs = {
+        f"test{_j + 1}_frac": float(final_class_counts[_j] / FINAL_M)
+        for _j in range(8)
+    }
+    _final_train_fracs = {
+        f"train{_j + 1}_frac": float(final_class_counts[_tc] / FINAL_M)
+        for _j, _tc in enumerate([0, 3, 6])
+    }
+
     result = {
         "v": _v,
         "seed": _seed,
@@ -1161,8 +1225,13 @@ def run_trial(
         "l2_scale": _w2,
         "blip_freq": blip_freq,
         "schedule_mode": schedule_mode,
-        "train_chi2": train_chi2,
+        "pure_train_chi2": pure_train_chi2,
         "test_chi2": test_chi2,
+        "blip_train_chi2": blip_train_chi2,
+        **_final_test_fracs,
+        **_final_train_fracs,
+        "other_frac": float(final_class_counts[8] / FINAL_M),
+        "other_chi2": final_other_chi2,
         "s1_blip_match_frac": s1_blip_match / FINAL_M,
         "s2_blip_match_frac": s2_blip_match / FINAL_M,
         "s3_blip_match_frac": s3_blip_match / FINAL_M,
