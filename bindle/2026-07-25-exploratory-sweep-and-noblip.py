@@ -293,9 +293,13 @@ def compound_plot_fn(
         v_values = sorted(df_cond["v"].unique())
         n_v = len(v_values)
 
-        fig = plt.figure(figsize=(max(10, 2.0 * n_v), 20))
+        fig = plt.figure(figsize=(max(10, 2.0 * n_v), 24))
         gs = GridSpec(
-            4, 1, figure=fig, height_ratios=[3, 2.4, 2.6, 3.2], hspace=0.55
+            5,
+            1,
+            figure=fig,
+            height_ratios=[3, 2.4, 2.6, 2.4, 3.2],
+            hspace=0.55,
         )
 
         # --- row 1: testing (solid) / ACTUAL training (dashed) loss over
@@ -476,13 +480,60 @@ def compound_plot_fn(
             ncol=1,
         )
 
-        # --- row 4: double descent heatmap -- training time (y) x model
+        # --- row 4: final training (actual) / testing loss vs model size
+        # v -- reuses `final` (each replicate's own last recorded row,
+        # computed above for row 3) so truncated replicates are handled
+        # the same way here; median with a shaded [0th, 100th] percentile
+        # band across replicates per v, testing solid / training (actual)
+        # dashed to match row 1's convention.
+        ax_final = fig.add_subplot(gs[3])
+        final_loss = (
+            final.groupby("v", observed=True)[["pure_train_chi2", "test_chi2"]]
+            .agg(["median", "min", "max"])
+            .reindex(v_values)
+        )
+        for metric_col, color, ls, label in (
+            ("test_chi2", "#1f77b4", "-", "testing"),
+            ("pure_train_chi2", "#d62728", "--", "training (actual)"),
+        ):
+            ax_final.plot(
+                v_values,
+                final_loss[(metric_col, "median")],
+                color=color,
+                ls=ls,
+                lw=1.8,
+                label=label,
+            )
+            ax_final.fill_between(
+                v_values,
+                final_loss[(metric_col, "min")],
+                final_loss[(metric_col, "max")],
+                color=color,
+                alpha=0.2,
+                lw=0,
+            )
+        ax_final.set_xlim(min(v_values), max(v_values))
+        ax_final.set_ylim(bottom=0)
+        ax_final.set_xlabel("v (visible genes)")
+        ax_final.set_ylabel("chi$^2$ error")
+        ax_final.set_title(
+            "final training (actual) / testing loss vs model size",
+            fontsize=10,
+        )
+        ax_final.legend(
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            fontsize=7,
+            frameon=False,
+        )
+
+        # --- row 5: double descent heatmap -- training time (y) x model
         # size v (x), colored by median testing error. Colormap matches
         # the one used for the double descent heatmaps in Nakkiran et al.
         # 2019 ("Deep Double Descent", arXiv:1912.02292, Figure 2) --
         # matplotlib's viridis (dark purple = low error, yellow = high
         # error).
-        ax4 = fig.add_subplot(gs[3])
+        ax4 = fig.add_subplot(gs[4])
         grid = (
             df_cond.groupby(["generation", "v"], observed=True)["test_chi2"]
             .median()
