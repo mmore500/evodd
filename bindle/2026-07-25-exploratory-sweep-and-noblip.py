@@ -283,6 +283,13 @@ def compound_plot_fn(
     sns,
 ):
     def make_compound_plot(df_cond, v_palette):
+        # every generation-axis (log-scaled) plot below starts at 10^6,
+        # not 1 -- drop earlier rows up front so they don't skew
+        # autoscaled y-limits or inflate rendered path complexity for
+        # data that's off the visible window anyway.
+        GEN_LOG_FLOOR = 1e6
+        df_cond = df_cond[df_cond["generation"] >= GEN_LOG_FLOOR]
+
         v_values = sorted(df_cond["v"].unique())
         n_v = len(v_values)
 
@@ -325,7 +332,8 @@ def compound_plot_fn(
                     ls="--",
                     lw=1.2,
                 )
-            ax.set_xscale("symlog")
+            ax.set_xscale("log")
+            ax.set_xlim(left=GEN_LOG_FLOOR)
             ax.set_ylim(bottom=0)
             ax.set_title(f"v={v}", fontsize=9, color=v_palette[v])
             ax.set_xlabel("generation", fontsize=7)
@@ -386,7 +394,8 @@ def compound_plot_fn(
                     alpha=0.2,
                     lw=0,
                 )
-            ax.set_xscale("symlog")
+            ax.set_xscale("log")
+            ax.set_xlim(left=GEN_LOG_FLOOR)
             ax.set_ylim(bottom=0)
             ax.set_xlabel("generation")
             ax.set_title(label, fontsize=10)
@@ -488,7 +497,8 @@ def compound_plot_fn(
             cmap="viridis",
             shading="nearest",
         )
-        ax4.set_yscale("symlog")
+        ax4.set_yscale("log")
+        ax4.set_ylim(bottom=GEN_LOG_FLOOR)
         ax4.set_xlabel("v (visible genes)")
         ax4.set_ylabel("generation (training time)")
         ax4.set_title("double descent: median testing error", fontsize=10)
