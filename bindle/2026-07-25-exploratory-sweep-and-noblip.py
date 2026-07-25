@@ -60,7 +60,8 @@ def do_watermark(mo, watermark):
 
 @app.cell(hide_code=True)
 def delimit_intro(mo):
-    mo.md("""
+    mo.md(
+        """
     # Exploratory sweep and noblip: double-descent analysis
 
     Downloads the collated timeseries parquet files for the
@@ -70,15 +71,18 @@ def delimit_intro(mo):
     environment schedule mode) -- renders a compound plot summarizing
     training/testing dynamics, phenotype composition, and double descent
     across model size `v` and training time.
-    """)
+    """
+    )
     return
 
 
 @app.cell(hide_code=True)
 def delimit_fetch_data(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Fetch data
-    """)
+    """
+    )
     return
 
 
@@ -138,9 +142,11 @@ def fetch_data(OSF_SLUGS, fetch_osf):
 
 @app.cell(hide_code=True)
 def delimit_load_data(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Load data
-    """)
+    """
+    )
     return
 
 
@@ -171,14 +177,16 @@ def describe_data(df):
 
 @app.cell(hide_code=True)
 def delimit_prep(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Prepare conditions
 
     A "condition" is one unique combination of the swept, non-model-size
     knobs (`blip_freq`, `l1_scale`, `l2_scale`, `zero_init`,
     `schedule_mode`) within a dataset -- everything except model size `v`
     (the double-descent x-axis) and `seed` (the replicate axis).
-    """)
+    """
+    )
     return
 
 
@@ -217,7 +225,8 @@ def show_conditions(conditions, pd):
 
 @app.cell(hide_code=True)
 def delimit_plot_helpers(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Plotting helpers
 
     Phenotype classes `test1_frac`..`test8_frac` are the 8 canonical
@@ -230,7 +239,8 @@ def delimit_plot_helpers(mo):
     Blip-pattern matches (`s1_blip_match_frac`..`s3_blip_match_frac`) are a
     subset of `other_frac`, so they're broken out of it rather than stacked
     on top.
-    """)
+    """
+    )
     return
 
 
@@ -493,9 +503,11 @@ def compound_plot_fn(
 
 @app.cell(hide_code=True)
 def delimit_render(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Compound plots by condition
-    """)
+    """
+    )
     return
 
 
@@ -508,6 +520,7 @@ def render_compound_plots(
     mo,
     np,
     pathlib,
+    plt,
     tp,
     v_palette,
 ):
@@ -552,7 +565,12 @@ def render_compound_plots(
         ) as _fig:
             pass
 
+        # mo.output.append renders the figure into the cell's output
+        # immediately, so it's safe (and, across ~dozens of conditions,
+        # necessary to avoid unbounded memory growth) to close it right
+        # after.
         mo.output.append(_fig)
+        plt.close(_fig)
     return
 
 
