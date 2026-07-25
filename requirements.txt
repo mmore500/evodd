@@ -21,6 +21,10 @@ black==22.10.0
     # via -r requirements.in
 bleach==6.4.0
     # via nbconvert
+certifi==2026.7.22
+    # via requests
+charset-normalizer==3.4.9
+    # via requests
 click==8.4.2
     # via
     #   black
@@ -64,7 +68,9 @@ h11==0.16.0
 hurry-filesize==0.9
     # via nbmetalog
 idna==3.18
-    # via anyio
+    # via
+    #   anyio
+    #   requests
 importlib-metadata==9.0.0
     # via watermark
 iniconfig==2.3.0
@@ -260,7 +266,7 @@ python-dateutil==2.9.0.post0
     #   pandas
 python-slugify==8.0.4
     # via teeplot
-pytz==2026.2
+pytz==2026.3.post1
     # via pandas
 pyyaml==6.0.3
     # via
@@ -276,6 +282,8 @@ referencing==0.37.0
     # via
     #   jsonschema
     #   jsonschema-specifications
+requests==2.33.1
+    # via -r requirements.in
 retry==0.9.2
     # via keyname
 rpds-py==0.30.0
@@ -350,6 +358,8 @@ typing-extensions==4.16.0
     #   uvicorn
 tzdata==2026.3
     # via pandas
+urllib3==2.7.0
+    # via requests
 uv==0.4.20
     # via -r requirements.in
 uvicorn==0.51.0
