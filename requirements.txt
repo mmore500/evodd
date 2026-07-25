@@ -253,6 +253,8 @@ pymdown-extensions==10.21.3
     # via marimo
 pyparsing==3.3.2
     # via matplotlib
+pypdf==6.14.2
+    # via -r requirements.in
 pytest==7.2.2
     # via
     #   -r requirements.in
@@ -352,6 +354,7 @@ typing-extensions==4.16.0
     #   jupyter-client
     #   marimo
     #   mistune
+    #   pypdf
     #   referencing
     #   starlette
     #   teeplot
