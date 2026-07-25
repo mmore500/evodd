@@ -408,12 +408,19 @@ def compound_plot_fn(
         )
 
         # --- row 3: stackplot of testing phenotype distributions across v,
-        # at the final recorded generation. Bright = training classes
-        # (overlap with test1/test4/test7), dull = test-only classes,
-        # grayscale = blip matches, white = remaining "other".
+        # at each replicate's own final recorded generation. Bright =
+        # training classes (overlap with test1/test4/test7), dull =
+        # test-only classes, grayscale = blip matches, white = remaining
+        # "other". Per-(v, seed) last-row (rather than a single shared max
+        # generation across the whole condition) since replicates can be
+        # truncated at different generations by a SLURM timeout (see
+        # bindle/2026-07-23-exploratory.py's progressive save-out).
         ax3 = fig.add_subplot(gs[2])
-        final_gen = df_cond["generation"].max()
-        final = df_cond[df_cond["generation"] == final_gen]
+        final = (
+            df_cond.sort_values("generation")
+            .groupby(["v", "seed"], observed=True)
+            .tail(1)
+        )
         frac_cols = [f"test{i}_frac" for i in range(1, 9)]
         blip_cols = [f"s{i}_blip_match_frac" for i in range(1, 4)]
         med = (
