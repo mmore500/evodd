@@ -100,6 +100,7 @@ jobs:
           find -type f -name "*.pdf" -exec mat2 --lightweight --inplace --unknown-members keep "{}" \;
       - run: |
           git init
+          sed -i '/teeplots\//d' .gitignore
           sed -i '/teeplots\//d' binder/.gitignore
           rm -rf .gitmodules
       - uses: fregante/setup-git-user@v1
@@ -131,6 +132,7 @@ jobs:
       - run: find -type f -name "*.pdf" -exec bash -c 'gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/screen -dNOPAUSE -dBATCH -dQUIET -sOutputFile="new.pdf" "{}"; rm "{}"; mv "new.pdf" "{}";' {} \;
       - run: |
           git init
+          sed -i '/teeplots\//d' .gitignore
           sed -i '/teeplots\//d' binder/.gitignore
           rm -rf .gitmodules
       - uses: fregante/setup-git-user@v1
@@ -182,6 +184,7 @@ jobs:
           find -type f -name "*.pdf" -exec mat2 --lightweight --inplace --unknown-members keep "{}" \;
       - run: |
           git init
+          sed -i '/teeplots\//d' .gitignore
           sed -i '/teeplots\//d' bindle/.gitignore
           sed -i '/\*\.ipynb/d' bindle/.gitignore
           rm -rf .gitmodules
@@ -214,6 +217,7 @@ jobs:
       - run: find -type f -name "*.pdf" -exec bash -c 'gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/screen -dNOPAUSE -dBATCH -dQUIET -sOutputFile="new.pdf" "{}"; rm "{}"; mv "new.pdf" "{}";' {} \;
       - run: |
           git init
+          sed -i '/teeplots\//d' .gitignore
           sed -i '/teeplots\//d' bindle/.gitignore
           sed -i '/\*\.ipynb/d' bindle/.gitignore
           rm -rf .gitmodules
