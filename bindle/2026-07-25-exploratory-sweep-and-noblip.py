@@ -88,11 +88,13 @@ def delimit_fetch_data(mo):
 
 @app.cell
 def osf_slugs():
-    # https://osf.io/xn6mk -- 2026-07-23-exploratory-sweep collated timeseries
-    # https://osf.io/7n63x -- 2026-07-23-exploratory-noblip collated timeseries
+    # https://osf.io/7n63x -- 2026-07-23-exploratory-sweep collated timeseries
+    #   (blip_freq swept across {0.66, 0.63, 0.6, 0.5})
+    # https://osf.io/xn6mk -- 2026-07-23-exploratory-noblip collated timeseries
+    #   (blip_freq fixed at 0)
     OSF_SLUGS = {
-        "exploratory-sweep": "xn6mk",
-        "exploratory-noblip": "7n63x",
+        "exploratory-sweep": "7n63x",
+        "exploratory-noblip": "xn6mk",
     }
     return (OSF_SLUGS,)
 
