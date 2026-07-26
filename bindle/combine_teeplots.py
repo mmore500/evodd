@@ -9,11 +9,14 @@ band above the original content, and writes the concatenated result to
 """
 import io
 import pathlib
+import subprocess
 import sys
+import tempfile
 
 import matplotlib
 
 matplotlib.use("pdf")
+from PIL import Image  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from pypdf import (  # noqa: E402
     PageObject,
@@ -24,6 +27,8 @@ from pypdf import (  # noqa: E402
 
 HEADER_HEIGHT_PT = 20.0
 HEADER_FONT_SIZE = 7
+SIZE_BUDGET_BYTES = 40_000_000
+RASTER_FALLBACK_DPI = 100
 
 
 def _make_header_page(text: str, width_pt: float) -> PageObject:
@@ -61,6 +66,51 @@ def _stamped_page(source_page: PageObject, label: str) -> PageObject:
     return stamped
 
 
+def _gs_compress(path: pathlib.Path) -> None:
+    compressed = path.with_name(path.stem + ".compressed.pdf")
+    subprocess.run(
+        [
+            "gs",
+            "-sDEVICE=pdfwrite",
+            "-dCompatibilityLevel=1.4",
+            "-dPDFSETTINGS=/screen",
+            "-dNOPAUSE",
+            "-dBATCH",
+            "-dQUIET",
+            f"-sOutputFile={compressed}",
+            str(path),
+        ],
+        check=True,
+    )
+    compressed.replace(path)
+
+
+def _rasterize(path: pathlib.Path, dpi: int) -> None:
+    # last-resort fallback when compression alone isn't enough: forces a
+    # hard byte-size ceiling (unlike vector content, whose size scales
+    # with plot complexity) by flattening every page to a raster image.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        prefix = pathlib.Path(tmp_dir) / "page"
+        subprocess.run(
+            [
+                "gs",
+                "-sDEVICE=png16m",
+                f"-r{dpi}",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dQUIET",
+                f"-o{prefix}-%04d.png",
+                str(path),
+            ],
+            check=True,
+        )
+        images = [
+            Image.open(png).convert("RGB")
+            for png in sorted(pathlib.Path(tmp_dir).glob("page-*.png"))
+        ]
+        images[0].save(path, save_all=True, append_images=images[1:])
+
+
 def combine_subdir(subdir: pathlib.Path, out_path: pathlib.Path) -> None:
     members = sorted(subdir.glob("*.pdf"))
     if not members:
@@ -70,9 +120,15 @@ def combine_subdir(subdir: pathlib.Path, out_path: pathlib.Path) -> None:
         reader = PdfReader(str(member))
         for page in reader.pages:
             writer.add_page(_stamped_page(page, str(member)))
-    print(f"{out_path} <- {len(members)} member(s)")
     with open(out_path, "wb") as f:
         writer.write(f)
+
+    _gs_compress(out_path)
+    if out_path.stat().st_size > SIZE_BUDGET_BYTES:
+        _rasterize(out_path, RASTER_FALLBACK_DPI)
+
+    size_mb = out_path.stat().st_size / 1e6
+    print(f"{out_path} <- {len(members)} member(s), {size_mb:.1f} MB")
 
 
 def main(teeplots_root: pathlib.Path) -> None:
