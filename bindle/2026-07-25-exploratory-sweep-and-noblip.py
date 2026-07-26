@@ -303,7 +303,13 @@ def compound_plot_fn(
         v_values = sorted(df_cond["v"].unique())
         n_v = len(v_values)
 
-        fig = plt.figure(figsize=(max(10, 2.0 * n_v), 24))
+        # dpi is deliberately low -- this controls only the resolution
+        # of the preview marimo embeds in the notebook cell output
+        # (which needs to stay within output_max_bytes across every
+        # condition's plot in the loop below); the teeplot-saved
+        # PDF/PNG files keep their own full-resolution dpi regardless,
+        # since teeplot_dpi isn't tied to this figure's dpi.
+        fig = plt.figure(figsize=(max(10, 2.0 * n_v), 24), dpi=32)
         gs = GridSpec(
             5,
             1,
