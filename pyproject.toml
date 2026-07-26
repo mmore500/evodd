@@ -56,3 +56,13 @@ force_sort_within_sections = true
 line_length = 79
 profile = "black"
 skip_gitignore = true
+
+[tool.marimo.runtime]
+# notebooks that loop over many conditions/replicates and append a plot
+# per iteration (e.g. bindle/2026-07-25-exploratory-sweep-and-noblip.py)
+# can exceed marimo's default 8MB per-cell output cap, which silently
+# replaces the entire cell's output with a "too large" warning instead
+# of rendering any of it. Notebooks that render many plots keep their
+# own embedded preview resolution low enough to fit this budget (full
+# resolution is always available via the saved teeplot files).
+output_max_bytes = 20_000_000
