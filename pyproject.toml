@@ -62,5 +62,7 @@ skip_gitignore = true
 # per iteration (e.g. bindle/2026-07-25-exploratory-sweep-and-noblip.py)
 # can exceed marimo's default 8MB per-cell output cap, which silently
 # replaces the entire cell's output with a "too large" warning instead
-# of rendering any of it.
-output_max_bytes = 100_000_000
+# of rendering any of it. Notebooks that render many plots keep their
+# own embedded preview resolution low enough to fit this budget (full
+# resolution is always available via the saved teeplot files).
+output_max_bytes = 20_000_000
