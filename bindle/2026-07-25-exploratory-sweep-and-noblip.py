@@ -17,8 +17,10 @@ def import_std():
 @app.cell
 def import_pkg():
     import marimo as mo
+    from matplotlib.colors import SymLogNorm
     from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator, ScalarFormatter
     import numpy as np
     import pandas as pd
     import seaborn as sns
@@ -28,6 +30,9 @@ def import_pkg():
     return (
         GridSpec,
         GridSpecFromSubplotSpec,
+        MaxNLocator,
+        ScalarFormatter,
+        SymLogNorm,
         mo,
         np,
         pd,
@@ -286,12 +291,24 @@ def compound_plot_fn(
     GRAY_BLIP_COLORS,
     GridSpec,
     GridSpecFromSubplotSpec,
+    MaxNLocator,
     OTHER_COLOR,
+    ScalarFormatter,
+    SymLogNorm,
     TEST_ONLY_IDX,
     TRAIN_OVERLAP_TEST_IDX,
     plt,
     sns,
 ):
+    def _use_readable_symlog_ticks(axis):
+        # matplotlib's default symlog locator/formatter collapses to a
+        # single offset-notation label (instead of normal tick labels)
+        # whenever the visible range never actually crosses linthresh
+        # -- MaxNLocator + ScalarFormatter reads fine in that case *and*
+        # when the range does cross into the log region.
+        axis.set_major_locator(MaxNLocator(nbins=6))
+        axis.set_major_formatter(ScalarFormatter())
+
     def make_compound_plot(df_cond, v_palette):
         # every generation-axis (log-scaled) plot below starts at 10^6,
         # not 1 -- drop earlier rows up front so they don't skew
@@ -299,6 +316,12 @@ def compound_plot_fn(
         # data that's off the visible window anyway.
         GEN_LOG_FLOOR = 1e6
         df_cond = df_cond[df_cond["generation"] >= GEN_LOG_FLOOR]
+
+        # chi^2 loss/error axes (and the heatmap's color axis) use
+        # symlog -- linear below this threshold, log above -- since
+        # chi2 values cluster near 0 as v/generation improve but can
+        # spike much higher (up to ~k-1 for k classes) early on.
+        CHI2_LINTHRESH = 1.0
 
         v_values = sorted(df_cond["v"].unique())
         n_v = len(v_values)
@@ -354,7 +377,9 @@ def compound_plot_fn(
                 )
             ax.set_xscale("log")
             ax.set_xlim(left=GEN_LOG_FLOOR)
+            ax.set_yscale("symlog", linthresh=CHI2_LINTHRESH)
             ax.set_ylim(bottom=0)
+            _use_readable_symlog_ticks(ax.yaxis)
             ax.set_title(f"v={v}", fontsize=9, color=v_palette[v])
             ax.set_xlabel("generation", fontsize=7)
             ax.tick_params(labelsize=7)
@@ -416,7 +441,9 @@ def compound_plot_fn(
                 )
             ax.set_xscale("log")
             ax.set_xlim(left=GEN_LOG_FLOOR)
+            ax.set_yscale("symlog", linthresh=CHI2_LINTHRESH)
             ax.set_ylim(bottom=0)
+            _use_readable_symlog_ticks(ax.yaxis)
             ax.set_xlabel("generation")
             ax.set_title(label, fontsize=10)
         ax_train.set_ylabel("chi$^2$ error")
@@ -529,7 +556,9 @@ def compound_plot_fn(
                 lw=0,
             )
         ax_final.set_xlim(min(v_values), max(v_values))
+        ax_final.set_yscale("symlog", linthresh=CHI2_LINTHRESH)
         ax_final.set_ylim(bottom=0)
+        _use_readable_symlog_ticks(ax_final.yaxis)
         ax_final.set_xlabel("v (visible genes)")
         ax_final.set_ylabel("chi$^2$ error")
         ax_final.set_title(
@@ -562,6 +591,7 @@ def compound_plot_fn(
             grid.index.to_numpy(dtype=float),
             grid.to_numpy(),
             cmap="viridis",
+            norm=SymLogNorm(linthresh=CHI2_LINTHRESH, vmin=0),
             shading="nearest",
         )
         ax4.set_yscale("log")
@@ -570,6 +600,7 @@ def compound_plot_fn(
         ax4.set_ylabel("generation (training time)")
         ax4.set_title("double descent: median testing error", fontsize=10)
         cbar = fig.colorbar(mesh, ax=ax4, pad=0.02)
+        _use_readable_symlog_ticks(cbar.ax.yaxis)
         cbar.set_label("median test chi$^2$ error")
 
         return fig
