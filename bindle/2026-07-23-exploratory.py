@@ -113,8 +113,19 @@ def configure_trial(mo):
     # default), "local" (randomize among equally-due environments), or
     # "global" (fully randomize the whole schedule's order).
     schedule_mode = _get("schedule-mode", "none", lambda s: str(s).lower())
+    # blip_mode controls how the 3 blip target phenotypes (presented
+    # during blip periods instead of the true S1/S2/S3 patterns; see
+    # build_schedule below) are constructed: "fixed" (default -- the
+    # original, deterministic single-bit flip at a fixed position per
+    # pattern), "bitflip" (single-bit flip at a position drawn uniformly
+    # at random, fixed for the whole replicate), or "random" (an entirely
+    # random +-1 phenotype, fixed for the whole replicate). "bitflip" and
+    # "random" both re-draw if the result would coincide with an actual
+    # training pattern (or its sign-negation -- see build_schedule).
+    blip_mode = _get("blip-mode", "fixed", lambda s: str(s).lower())
     return (
         blip_freq,
+        blip_mode,
         l1_scale,
         l2_scale,
         num_epoch,
@@ -128,6 +139,7 @@ def configure_trial(mo):
 @app.cell
 def show_config(
     blip_freq,
+    blip_mode,
     l1_scale,
     l2_scale,
     num_epoch,
@@ -146,6 +158,7 @@ def show_config(
                 "l1_scale": l1_scale,
                 "l2_scale": l2_scale,
                 "blip_freq": blip_freq,
+                "blip_mode": blip_mode,
                 "num_epoch": num_epoch,
                 "schedule_mode": schedule_mode,
             }
@@ -910,21 +923,50 @@ def build_schedule(
     TOTAL_BLOCKS,
     TRAINING_SET,
     blip_freq,
+    blip_mode,
     np,
     schedule_mode,
     seed,
     weighted_interleave,
 ):
-    def make_blips():
-        S1b = TRAINING_SET[0].copy()
-        S1b[0] *= -1
-        S2b = TRAINING_SET[1].copy()
-        S2b[4] *= -1
-        S3b = TRAINING_SET[2].copy()
-        S3b[8] *= -1
-        return S1b, S2b, S3b
+    def _is_training_member(candidate, training_set):
+        # a pattern's sign-negation is treated as equivalent to it
+        # everywhere else in this notebook (see fold_to_canonical), so a
+        # random blip draw landing on -S1/-S2/-S3 counts as "actually
+        # training on a real class" just as much as +S1/+S2/+S3 does.
+        return any(
+            np.array_equal(candidate, s) or np.array_equal(candidate, -s)
+            for s in training_set
+        )
 
-    S1b, S2b, S3b = make_blips()
+    def make_blips(rng):
+        if blip_mode == "fixed":
+            S1b = TRAINING_SET[0].copy()
+            S1b[0] *= -1
+            S2b = TRAINING_SET[1].copy()
+            S2b[4] *= -1
+            S3b = TRAINING_SET[2].copy()
+            S3b[8] *= -1
+            return S1b, S2b, S3b
+
+        assert blip_mode in ("bitflip", "random")
+        _n = TRAINING_SET.shape[1]
+        blips = []
+        for _i in range(3):
+            while True:
+                if blip_mode == "bitflip":
+                    _candidate = TRAINING_SET[_i].copy()
+                    _candidate[rng.integers(0, _n)] *= -1
+                else:
+                    _candidate = rng.choice(np.array([-1.0, 1.0]), size=_n)
+                if not _is_training_member(_candidate, TRAINING_SET):
+                    blips.append(_candidate)
+                    break
+        return tuple(blips)
+
+    assert blip_mode in ("fixed", "bitflip", "random")
+    _blip_rng = np.random.default_rng(seed)
+    S1b, S2b, S3b = make_blips(_blip_rng)
     training_set = np.vstack([TRAINING_SET.astype(np.float64), S1b, S2b, S3b])
     BLIP_SET = np.stack([S1b, S2b, S3b])
 
@@ -1107,6 +1149,7 @@ def run_trial(
     append_csv_row,
     append_npz_array,
     blip_freq,
+    blip_mode,
     compute_errors_output_masked_ext,
     compute_errors_output_masked_zero_masked,
     contextlib,
@@ -1199,6 +1242,7 @@ def run_trial(
         "l1scale": _w1,
         "l2scale": _w2,
         "blipfreq": blip_freq,
+        "blipmode": blip_mode,
         "numepoch": _K,
         "schedulemode": schedule_mode,
         "replicate": replicate_uid,
@@ -1242,6 +1286,7 @@ def run_trial(
             "l1_scale",
             "l2_scale",
             "blip_freq",
+            "blip_mode",
             "num_epoch",
             "schedule_mode",
             "replicate_uid",
@@ -1292,6 +1337,7 @@ def run_trial(
         _row["l1_scale"] = _w1
         _row["l2_scale"] = _w2
         _row["blip_freq"] = blip_freq
+        _row["blip_mode"] = blip_mode
         _row["num_epoch"] = _K
         _row["schedule_mode"] = schedule_mode
         _row["replicate_uid"] = replicate_uid
@@ -1496,6 +1542,7 @@ def run_trial(
         }
     )
     trace_df["schedule_mode"] = pd.Categorical(trace_df["schedule_mode"])
+    trace_df["blip_mode"] = pd.Categorical(trace_df["blip_mode"])
     trace_df["replicate_uid"] = pd.Categorical(trace_df["replicate_uid"])
 
     _final_test_fracs = {
@@ -1515,6 +1562,7 @@ def run_trial(
         "l1_scale": _w1,
         "l2_scale": _w2,
         "blip_freq": blip_freq,
+        "blip_mode": blip_mode,
         "schedule_mode": schedule_mode,
         "pure_train_chi2": pure_train_chi2,
         "test_chi2": test_chi2,
