@@ -103,7 +103,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # hardware) at ~83,000 generations/sec, so one 500M-generation replicate
 # takes ~100 minutes -- comfortably inside the 4-hour job time limit below
 # even allowing for slower cluster CPUs.
-BLIP_FREQS=(0.1 0.2 0.33 0.5)
+BLIP_FREQS=(0.33 0.5 0.6 0.66)
 BLIP_MODES=(bitflip random)
 L1_SCALES=(1.0 0.999 0.9966 0.998)
 L2_SCALES=(0.0 0.001 0.003 0.002)
