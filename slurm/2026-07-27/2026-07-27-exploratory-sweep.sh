@@ -21,10 +21,10 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 
 # VARIANT of slurm/2026-07-23/2026-07-23-exploratory-sweep.sh: same v/seed
 # structure, index decomposition, and CHUNK-packing scheme as the
-# production sweep -- the swept parameter GRIDS differ (tighter L1/L2
-# mixes, lower blip frequencies including a blip_freq=0 no-blip control,
-# schedule_mode restricted to none+local (dropping global), and v
-# restricted to {0, 4, 8, 12, 16, 20}).
+# production sweep -- the swept parameter GRIDS differ (pure-L1 plus
+# tighter near-pure-L1 mixes, lower blip frequencies including a
+# blip_freq=0 no-blip control, schedule_mode restricted to none+local
+# (dropping global), and v restricted to {0, 4, 8, 12, 16, 20}).
 #
 # Sweep: the single-trial elastic-net GRN notebook (v1..v20 double-descent
 # model) across:
@@ -33,9 +33,9 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 #     build_schedule below the notebook's cell of the same name), i.e. a
 #     no-blip control -- schedule_mode is still meaningful since ties
 #     among the 3 equal-count true patterns still get broken by it.
-#   - (l1_scale, l2_scale) in {(0.999, 0.001), (0.9966, 0.003), (0.998, 0.002)}
-#     three near-pure-L1 mixes, varying only in how much L2 weight is
-#     mixed in                                                       (3)
+#   - (l1_scale, l2_scale) in {(1.0, 0.0), (0.999, 0.001), (0.9966, 0.003),
+#     (0.998, 0.002)} -- pure L1, plus three near-pure-L1 mixes varying
+#     only in how much L2 weight is mixed in                         (4)
 #   - zero_init     in {True, False}                                (2)
 #   - schedule_mode in {none, local}                                 (2)
 #     "none" is the notebook's default; "global" is dropped from this
@@ -45,8 +45,8 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # rest, so this isn't one uniform Cartesian product):
 #   - v = 0                      -> 1 replicate  (seed 1 only)       (1 v x 1 seed)
 #   - v in {4, 8, 12, 16, 20}    -> 4 replicates each (seeds 1..4)    (5 v x 4 seed)
-# total = 5 * 3 * 2 * 2 * (1*1 + 5*4) = 5 * 3 * 2 * 2 * 21 = 1260 replicates,
-# i.e. 630 (blip_freq, l1/l2 mix, zero_init, v, seed) CONDITIONS, each run
+# total = 5 * 4 * 2 * 2 * (1*1 + 5*4) = 5 * 4 * 2 * 2 * 21 = 1680 replicates,
+# i.e. 840 (blip_freq, l1/l2 mix, zero_init, v, seed) CONDITIONS, each run
 # under both schedule_mode values.
 #
 # Generations vs. epochs: the notebook's SSWM loop runs
@@ -66,7 +66,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # decomposition below, exactly matching CHUNK=2, so each array task's 2
 # concurrent replicates are the SAME (blip_freq, l1/l2 mix, zero_init, v,
 # seed) condition run under both schedule_mode values side by side --
-# this divides 1260 replicates evenly into 1260 / 2 = 630 array tasks.
+# this divides 1680 replicates evenly into 1680 / 2 = 840 array tasks.
 #
 # Global replicate index r in [0, N_TASKS) is split into two contiguous
 # blocks rather than one uniform Cartesian product, since v=0 and the
@@ -86,7 +86,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 #     mix_idx = (r' / N_SCHEDULE / N_ZERO / N_V_REST) % N_MIX;
 #     seed_idx = (r' / N_SCHEDULE / N_ZERO / N_V_REST / N_MIX) % N_REST_SEED;
 #     blip_idx = r' / N_SCHEDULE / N_ZERO / N_V_REST / N_MIX / N_REST_SEED.
-# N_TASKS_V0 (60) is itself a multiple of CHUNK=2, so no CHUNK-pair
+# N_TASKS_V0 (80) is itself a multiple of CHUNK=2, so no CHUNK-pair
 # straddles the v0/rest block boundary. Array task t owns the CHUNK
 # consecutive indices r = t * CHUNK + j for j in [0, CHUNK) (each
 # launched as a background job).
@@ -96,8 +96,8 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # takes ~100 minutes -- comfortably inside the 4-hour job time limit below
 # even allowing for slower cluster CPUs.
 BLIP_FREQS=(0 0.1 0.2 0.33 0.5)
-L1_SCALES=(0.999 0.9966 0.998)
-L2_SCALES=(0.001 0.003 0.002)
+L1_SCALES=(1.0 0.999 0.9966 0.998)
+L2_SCALES=(0.0 0.001 0.003 0.002)
 ZERO_INITS=(True False)
 SCHEDULE_MODES=(none local)
 V0_SEEDS=(1)
