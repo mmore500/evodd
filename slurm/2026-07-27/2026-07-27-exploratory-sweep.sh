@@ -22,12 +22,12 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # VARIANT of slurm/2026-07-23/2026-07-23-exploratory-sweep.sh: same v/seed
 # structure, index decomposition, and CHUNK-packing scheme as the
 # production sweep -- the swept parameter GRIDS differ (tighter L1/L2
-# mixes, lower blip frequencies, and schedule_mode restricted to
-# none+local, dropping global).
+# mixes, lower blip frequencies, schedule_mode restricted to none+local
+# (dropping global), and v restricted to {0, 4, 8, 12, 16, 20}).
 #
 # Sweep: the single-trial elastic-net GRN notebook (v1..v20 double-descent
 # model) across:
-#   - blip_freq     in {0.1, 0.2, 0.33}                              (3)
+#   - blip_freq     in {0.1, 0.2, 0.33, 0.5}                         (4)
 #   - (l1_scale, l2_scale) in {(0.999, 0.001), (0.9966, 0.003), (0.998, 0.002)}
 #     three near-pure-L1 mixes, varying only in how much L2 weight is
 #     mixed in                                                       (3)
@@ -39,10 +39,9 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # crossed with an UNEVEN v/seed split (v=0 gets fewer replicates than the
 # rest, so this isn't one uniform Cartesian product):
 #   - v = 0                      -> 1 replicate  (seed 1 only)       (1 v x 1 seed)
-#   - v in {2, 4, ..., 20} (even, excluding 0) -> 4 replicates each
-#     (seeds 1..4)                                                   (10 v x 4 seed)
-# total = 3 * 3 * 2 * 2 * (1*1 + 10*4) = 3 * 3 * 2 * 2 * 41 = 1476 replicates,
-# i.e. 738 (blip_freq, l1/l2 mix, zero_init, v, seed) CONDITIONS, each run
+#   - v in {4, 8, 12, 16, 20}    -> 4 replicates each (seeds 1..4)    (5 v x 4 seed)
+# total = 4 * 3 * 2 * 2 * (1*1 + 5*4) = 4 * 3 * 2 * 2 * 21 = 1008 replicates,
+# i.e. 504 (blip_freq, l1/l2 mix, zero_init, v, seed) CONDITIONS, each run
 # under both schedule_mode values.
 #
 # Generations vs. epochs: the notebook's SSWM loop runs
@@ -62,7 +61,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # decomposition below, exactly matching CHUNK=2, so each array task's 2
 # concurrent replicates are the SAME (blip_freq, l1/l2 mix, zero_init, v,
 # seed) condition run under both schedule_mode values side by side --
-# this divides 1476 replicates evenly into 1476 / 2 = 738 array tasks.
+# this divides 1008 replicates evenly into 1008 / 2 = 504 array tasks.
 #
 # Global replicate index r in [0, N_TASKS) is split into two contiguous
 # blocks rather than one uniform Cartesian product, since v=0 and the
@@ -74,7 +73,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 #     zero_idx = (r / N_SCHEDULE) % N_ZERO;
 #     mix_idx = (r / N_SCHEDULE / N_ZERO) % N_MIX;
 #     blip_idx = r / N_SCHEDULE / N_ZERO / N_MIX.
-#   - r >= N_TASKS_V0: the "rest" block (v in {2,4,...,20}, 4 seeds
+#   - r >= N_TASKS_V0: the "rest" block (v in {4,8,12,16,20}, 4 seeds
 #     each), re-based to r' = r - N_TASKS_V0.
 #     schedule_idx = r' % N_SCHEDULE;
 #     zero_idx = (r' / N_SCHEDULE) % N_ZERO;
@@ -82,7 +81,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 #     mix_idx = (r' / N_SCHEDULE / N_ZERO / N_V_REST) % N_MIX;
 #     seed_idx = (r' / N_SCHEDULE / N_ZERO / N_V_REST / N_MIX) % N_REST_SEED;
 #     blip_idx = r' / N_SCHEDULE / N_ZERO / N_V_REST / N_MIX / N_REST_SEED.
-# N_TASKS_V0 (36) is itself a multiple of CHUNK=2, so no CHUNK-pair
+# N_TASKS_V0 (48) is itself a multiple of CHUNK=2, so no CHUNK-pair
 # straddles the v0/rest block boundary. Array task t owns the CHUNK
 # consecutive indices r = t * CHUNK + j for j in [0, CHUNK) (each
 # launched as a background job).
@@ -91,14 +90,14 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # hardware) at ~83,000 generations/sec, so one 500M-generation replicate
 # takes ~100 minutes -- comfortably inside the 4-hour job time limit below
 # even allowing for slower cluster CPUs.
-BLIP_FREQS=(0.1 0.2 0.33)
+BLIP_FREQS=(0.1 0.2 0.33 0.5)
 L1_SCALES=(0.999 0.9966 0.998)
 L2_SCALES=(0.001 0.003 0.002)
 ZERO_INITS=(True False)
 SCHEDULE_MODES=(none local)
 V0_SEEDS=(1)
 REST_SEEDS=(1 2 3 4)
-V_REST=(2 4 6 8 10 12 14 16 18 20)
+V_REST=(4 8 12 16 20)
 N_BLIP=${#BLIP_FREQS[@]}
 N_MIX=${#L1_SCALES[@]}
 N_ZERO=${#ZERO_INITS[@]}
