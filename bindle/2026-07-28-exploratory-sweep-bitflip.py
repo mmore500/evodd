@@ -257,14 +257,12 @@ def delimit_plot_helpers(mo):
     dedicated "bitflip" bucket (`bitflip_frac`) out *before* falling
     through to "other" -- so `bitflip_frac` and `other_frac` are disjoint
     by construction, and `bitflip_frac` spans all 48 possible single-bit
-    transformations of the 3 training patterns. The specific
-    per-replicate-fixed variant actually presented as a blip target
-    (`s1_blip_match_frac`..`s3_blip_match_frac`) is itself one of those 48
-    single-bit flips under this job's `blip_mode=bitflip`, so it's a
-    subset of `bitflip_frac` (not `other_frac`) -- broken out of it into
-    its own grayscale slices below, with the remaining (non-presented)
-    bitflip variants stacked as their own slice rather than left folded
-    into "other".
+    transformations of the 3 training patterns (not just the one variant
+    actually presented as a blip target in a given replicate --
+    `s1_blip_match_frac`..`s3_blip_match_frac` -- which is only 3 of
+    those 48). The stackplot below shows `bitflip_frac` as one gray
+    slice, so gray reflects the full 48-variant population rather than
+    just the 3 per-replicate-presented variants.
     """)
     return
 
@@ -290,14 +288,12 @@ def plot_helpers(colorsys):
         dull("#f58231"),
         dull("#911eb4"),
     ]
-    GRAY_BLIP_COLORS = ["#404040", "#808080", "#bfbfbf"]
-    BITFLIP_OTHER_COLOR = "#17becf"
+    GRAY_BITFLIP_COLOR = "#808080"
     OTHER_COLOR = "#ffffff"
     return (
-        BITFLIP_OTHER_COLOR,
         BRIGHT_TRAIN_COLORS,
         DULL_TEST_COLORS,
-        GRAY_BLIP_COLORS,
+        GRAY_BITFLIP_COLOR,
         OTHER_COLOR,
         TEST_ONLY_IDX,
         TRAIN_OVERLAP_TEST_IDX,
@@ -306,10 +302,9 @@ def plot_helpers(colorsys):
 
 @app.cell
 def compound_plot_fn(
-    BITFLIP_OTHER_COLOR,
     BRIGHT_TRAIN_COLORS,
     DULL_TEST_COLORS,
-    GRAY_BLIP_COLORS,
+    GRAY_BITFLIP_COLOR,
     GridSpec,
     GridSpecFromSubplotSpec,
     MaxNLocator,
@@ -479,12 +474,13 @@ def compound_plot_fn(
         # --- row 3: stackplot of testing phenotype distributions across v,
         # at each replicate's own final recorded generation. Bright =
         # training classes (overlap with test1/test4/test7), dull =
-        # test-only classes, grayscale = the specific presented blip
-        # variant's matches, teal = the remaining (non-presented) bitflip
-        # variants, white = residual "other". Per-(v, seed) last-row
-        # (rather than a single shared max generation across the whole
-        # condition) since replicates can be truncated at different
-        # generations by a SLURM timeout (see
+        # test-only classes, gray = the full "bitflip" bucket (any of the
+        # 48 possible single-bit transformations of the 3 training
+        # patterns, not just the 3 per-replicate-presented blip targets --
+        # see the plotting-helpers note above), white = residual "other".
+        # Per-(v, seed) last-row (rather than a single shared max
+        # generation across the whole condition) since replicates can be
+        # truncated at different generations by a SLURM timeout (see
         # bindle/2026-07-23-exploratory.py's progressive save-out).
         ax3 = fig.add_subplot(gs[2])
         final = (
@@ -493,47 +489,31 @@ def compound_plot_fn(
             .tail(1)
         )
         frac_cols = [f"test{i}_frac" for i in range(1, 9)]
-        blip_cols = [f"s{i}_blip_match_frac" for i in range(1, 4)]
         med = (
             final.groupby("v", observed=True)[
-                frac_cols + blip_cols + ["bitflip_frac", "other_frac"]
+                frac_cols + ["bitflip_frac", "other_frac"]
             ]
             .median()
             .reindex(v_values)
         )
-        blip_sum = med[blip_cols].sum(axis=1)
-        # the specific per-replicate-fixed blip target (blip_cols) is one
-        # of the 48 single-bit-flip variants counted in bitflip_frac (this
-        # job's blip_mode=bitflip guarantees every presented variant is a
-        # single-bit flip) -- subtract it back out of bitflip_frac so the
-        # stack doesn't double-count; clip guards against floating-point
-        # edge cases. other_frac needs no such correction here: unlike the
-        # `2026-07-27-exploratory-sweep`/`-randomblip` notebooks' dataset,
-        # bitflip_frac and other_frac are disjoint by construction (see
-        # the plotting-helpers note above).
-        bitflip_only = (med["bitflip_frac"] - blip_sum).clip(lower=0)
 
         train_layers = [med[f"test{i}_frac"] for i in TRAIN_OVERLAP_TEST_IDX]
         test_only_layers = [med[f"test{i}_frac"] for i in TEST_ONLY_IDX]
-        blip_layers = [med[c] for c in blip_cols]
 
         stack = (
             train_layers
             + test_only_layers
-            + blip_layers
-            + [bitflip_only, med["other_frac"]]
+            + [med["bitflip_frac"], med["other_frac"]]
         )
         colors = (
             BRIGHT_TRAIN_COLORS
             + DULL_TEST_COLORS
-            + GRAY_BLIP_COLORS
-            + [BITFLIP_OTHER_COLOR, OTHER_COLOR]
+            + [GRAY_BITFLIP_COLOR, OTHER_COLOR]
         )
         labels = (
             [f"train (test{i})" for i in TRAIN_OVERLAP_TEST_IDX]
             + [f"test-only (test{i})" for i in TEST_ONLY_IDX]
-            + [f"blip s{i} (presented variant)" for i in range(1, 4)]
-            + ["bitflip (other 45 variants)", "other"]
+            + ["bitflip (any of 48 variants)", "other"]
         )
         polys = ax3.stackplot(v_values, *stack, colors=colors, labels=labels)
         # "other" (last layer) is white -- outline it so it's visible
