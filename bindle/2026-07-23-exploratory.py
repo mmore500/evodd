@@ -297,7 +297,35 @@ def targets_definitions(N, np):
     assert CLASS_8.shape == (8, N)
     for _s in TRAINING_SET:
         assert any(np.array_equal(_s, _c) for _c in CLASS_8)
-    return CLASS_8, MOD_A, TRAINING_SET
+
+    # all possible single-bit transformations of each training set item --
+    # the full population that the "bitflip" blip_mode's per-replicate
+    # draw (see build_schedule below) samples one candidate from.
+    _bitflip_rows = []
+    for _s in TRAINING_SET:
+        for _bit in range(N):
+            _variant = _s.copy()
+            _variant[_bit] *= -1
+            _bitflip_rows.append(_variant)
+    BITFLIP_CLASS_48 = np.stack(_bitflip_rows)
+    assert BITFLIP_CLASS_48.shape == (3 * N, N)
+
+    # verify all 48 variants are pairwise distinct under +/- equivalence
+    # (fold_to_canonical treats a pattern and its negation as the same
+    # class everywhere else in this notebook) and that none coincides
+    # with a CLASS_8 member under that same equivalence -- both provable
+    # from the min pairwise Hamming distance between TRAINING_SET members
+    # (>=8, vs. a single bit flip's distance of 1) but checked here
+    # exhaustively as a cheap runtime guard.
+    def _folds_equal(a, b):
+        return np.array_equal(a, b) or np.array_equal(a, -b)
+
+    for _i in range(BITFLIP_CLASS_48.shape[0]):
+        for _j in range(_i + 1, BITFLIP_CLASS_48.shape[0]):
+            assert not _folds_equal(BITFLIP_CLASS_48[_i], BITFLIP_CLASS_48[_j])
+        for _c in CLASS_8:
+            assert not _folds_equal(BITFLIP_CLASS_48[_i], _c)
+    return BITFLIP_CLASS_48, CLASS_8, MOD_A, TRAINING_SET
 
 
 @app.cell(hide_code=True)
@@ -318,10 +346,20 @@ def generalisation_core(MOD_A, np):
         return np.where(mod4_match[:, None], Pa_batch, -Pa_batch)
 
     def classify_exact_counts(Pa_batch, candidates):
+        # +/- match rather than exact-sign match: fold_to_canonical only
+        # examines the last 4-bit block to pick a fold direction, so it
+        # mis-folds any candidate whose own last block isn't uniformly
+        # +/-MOD_A[3] (e.g. a single-bit-flip candidate whose flipped bit
+        # falls inside that block) -- checking both orientations here
+        # sidesteps that rather than relying on the input already being
+        # correctly folded. abs(dot) is invariant to Pa_batch's own global
+        # sign, so this is equally correct whether Pa_batch is pre-folded
+        # or raw, and is a no-op change for candidates (like CLASS_8) that
+        # fold_to_canonical does handle correctly.
         signs = np.sign(Pa_batch)
         dots = signs @ candidates.T
         n = candidates.shape[1]
-        return (dots == n).sum(axis=0)
+        return (np.abs(dots) == n).sum(axis=0)
 
     def chi_squared(counts, M):
         k = counts.shape[0]
@@ -342,6 +380,7 @@ def delimit_masked_model(mo):
 
 @app.cell
 def masked_model_core(
+    BITFLIP_CLASS_48,
     CLASS_8,
     N,
     chi_squared,
@@ -396,24 +435,37 @@ def masked_model_core(
         match = dots == N
         train_cols = [0, 3, 6]
         other_cols = [1, 2, 4, 5, 7]
+        # +/- match against the 48 single-bit-transformation variants of
+        # the training set (see classify_exact_counts for why abs() is
+        # needed rather than a single-orientation exact match) -- carved
+        # out of "other" into its own bucket (index k, just below "other"
+        # at k+1) rather than left as unlabeled noise, since a genotype
+        # landing exactly on one of these 48 patterns is a specifically
+        # interesting outcome (a near-training generalization) distinct
+        # from arbitrary "other" phenotypes.
+        bitflip_match = np.any(np.abs(signs @ BITFLIP_CLASS_48.T) == N, axis=1)
         assigned = np.full(M, -1, dtype=np.int64)
         still_open = np.ones(M, dtype=bool)
         for col in train_cols + other_cols:
             take = still_open & match[:, col]
             assigned[take] = col
             still_open &= ~take
-        assigned[still_open] = k
-        counts = np.zeros(k + 1, dtype=np.int64)
-        for col in range(k + 1):
+        take_bitflip = still_open & bitflip_match
+        assigned[take_bitflip] = k
+        still_open &= ~take_bitflip
+        assigned[still_open] = k + 1
+        counts = np.zeros(k + 2, dtype=np.int64)
+        for col in range(k + 2):
             counts[col] = int((assigned == col).sum())
 
         # chi-squared evenness of the phenotype distribution *within* the
         # "other" bucket (still_open: samples matching none of the 8
-        # canonical classes) -- bit-pack each such sample's sign pattern
-        # into an integer id, tally occurrences of each distinct pattern
-        # actually observed, and score how evenly those occurrences are
-        # spread (0 = perfectly even across whatever distinct patterns
-        # were observed). NaN when "other" is empty -- nothing to measure.
+        # canonical classes or any of the 48 bitflip variants) -- bit-pack
+        # each such sample's sign pattern into an integer id, tally
+        # occurrences of each distinct pattern actually observed, and
+        # score how evenly those occurrences are spread (0 = perfectly
+        # even across whatever distinct patterns were observed). NaN when
+        # "other" is empty -- nothing to measure.
         other_signs = signs[still_open]
         if other_signs.shape[0] > 0:
             bits = (other_signs > 0).astype(np.int64)
@@ -441,6 +493,7 @@ def masked_model_core(
 
 @app.cell
 def masked_model_ext_elastic(
+    BITFLIP_CLASS_48,
     BLIP_SET,
     benefit,
     builtins,
@@ -605,9 +658,11 @@ def masked_model_ext_elastic(
         Pa_batch = develop_batch_output_masked(G_batch, B, visible_mask)
         Pa_scored = Pa_batch[:, :n_score]
         Pa_folded = fold_to_canonical(Pa_scored)
-        # class_counts is length 9: CLASS_8 classes 1..8 (indices 0..7,
-        # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3) plus
-        # "other" (index 8, matches none of the 8 canonical classes).
+        # class_counts is length 10: CLASS_8 classes 1..8 (indices 0..7,
+        # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3), the
+        # "bitflip" bucket (index 8, matches any of the 48 single-bit
+        # transformations of a training set item), and "other" (index 9,
+        # matches none of the above).
         (
             class_counts,
             other_chi2,
@@ -615,10 +670,19 @@ def masked_model_ext_elastic(
         ) = classify_by_phenotype_output_masked(Pa_scored)
         train_counts = class_counts[[0, 3, 6]]
         blip_counts = classify_exact_counts(Pa_folded, BLIP_SET)
+        # per-pattern breakdown across all 48 bitflip variants, for a chi2
+        # stat weighted by their expected sampling frequency: make_blips
+        # draws each replicate's presented variant uniformly at random
+        # from among the 16 single-bit positions for its training item, so
+        # (since all 3 items are otherwise presented equally often) the
+        # correct expected frequency across the 48 variants is uniform --
+        # exactly what chi_squared's default 1/k-per-class already assumes.
+        bitflip_counts_48 = classify_exact_counts(Pa_folded, BITFLIP_CLASS_48)
         return (
             chi_squared(train_counts, M),
             chi_squared(class_counts[:8], M),
             chi_squared(blip_counts, M),
+            chi_squared(bitflip_counts_48, M),
             class_counts,
             blip_counts,
             other_chi2,
@@ -633,6 +697,7 @@ def masked_model_ext_elastic(
 
 @app.cell
 def masked_model_zero_masked_elastic(
+    BITFLIP_CLASS_48,
     BLIP_SET,
     benefit,
     builtins,
@@ -799,9 +864,11 @@ def masked_model_zero_masked_elastic(
         Pa_batch = develop_batch_output_masked(G_batch, B, visible_mask)
         Pa_scored = Pa_batch[:, :n_score]
         Pa_folded = fold_to_canonical(Pa_scored)
-        # class_counts is length 9: CLASS_8 classes 1..8 (indices 0..7,
-        # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3) plus
-        # "other" (index 8, matches none of the 8 canonical classes).
+        # class_counts is length 10: CLASS_8 classes 1..8 (indices 0..7,
+        # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3), the
+        # "bitflip" bucket (index 8, matches any of the 48 single-bit
+        # transformations of a training set item), and "other" (index 9,
+        # matches none of the above).
         (
             class_counts,
             other_chi2,
@@ -809,10 +876,15 @@ def masked_model_zero_masked_elastic(
         ) = classify_by_phenotype_output_masked(Pa_scored)
         train_counts = class_counts[[0, 3, 6]]
         blip_counts = classify_exact_counts(Pa_folded, BLIP_SET)
+        # see compute_errors_output_masked_ext for why uniform (the
+        # chi_squared default) is the correct expected-frequency weighting
+        # across the 48 bitflip variants.
+        bitflip_counts_48 = classify_exact_counts(Pa_folded, BITFLIP_CLASS_48)
         return (
             chi_squared(train_counts, M),
             chi_squared(class_counts[:8], M),
             chi_squared(blip_counts, M),
+            chi_squared(bitflip_counts_48, M),
             class_counts,
             blip_counts,
             other_chi2,
@@ -1256,11 +1328,13 @@ def run_trial(
             "pure_train_chi2",
             "test_chi2",
             "blip_train_chi2",
+            "bitflip_chi2",
         ]
         + [f"test{_j + 1}_frac" for _j in range(8)]
         + [f"train{_j + 1}_frac" for _j in range(3)]
         + [f"s{_j + 1}_blip_match_frac" for _j in range(3)]
         + [
+            "bitflip_frac",
             "other_frac",
             "other_chi2",
             "other_n_classes",
@@ -1287,7 +1361,7 @@ def run_trial(
         # configured for this replicate -- while regularization_loss is
         # the actual weighted penalty subtracted from benefit in the
         # fitness function driving evolution.
-        _ptr, _te, _btr, _cc, _bc, _oc, _noc = _errors_fn(
+        _ptr, _te, _btr, _bfchi2, _cc, _bc, _oc, _noc = _errors_fn(
             _B_trace[_i], _seed + 2000, _TRACE_M
         )
         _l1 = l1_cost(_B_trace[_i])
@@ -1303,6 +1377,7 @@ def run_trial(
             "pure_train_chi2": float(_ptr),
             "test_chi2": float(_te),
             "blip_train_chi2": float(_btr),
+            "bitflip_chi2": float(_bfchi2),
         }
         for _j in range(8):
             _row[f"test{_j + 1}_frac"] = float(_cc[_j]) / _TRACE_M
@@ -1310,7 +1385,8 @@ def run_trial(
             _row[f"train{_j + 1}_frac"] = float(_cc[_tc]) / _TRACE_M
         for _j in range(3):
             _row[f"s{_j + 1}_blip_match_frac"] = float(_bc[_j]) / _TRACE_M
-        _row["other_frac"] = float(_cc[8]) / _TRACE_M
+        _row["bitflip_frac"] = float(_cc[8]) / _TRACE_M
+        _row["other_frac"] = float(_cc[9]) / _TRACE_M
         _row["other_chi2"] = float(_oc)
         _row["other_n_classes"] = int(_noc)
         _row["l1_loss"] = float(_l1)
@@ -1486,6 +1562,7 @@ def run_trial(
         pure_train_chi2,
         test_chi2,
         blip_train_chi2,
+        bitflip_chi2,
         final_class_counts,
         final_blip_counts,
         final_other_chi2,
@@ -1510,9 +1587,11 @@ def run_trial(
             "pure_train_chi2": np.float32,
             "test_chi2": np.float32,
             "blip_train_chi2": np.float32,
+            "bitflip_chi2": np.float32,
             **{f"test{_j + 1}_frac": np.float32 for _j in range(8)},
             **{f"train{_j + 1}_frac": np.float32 for _j in range(3)},
             **{f"s{_j + 1}_blip_match_frac": np.float32 for _j in range(3)},
+            "bitflip_frac": np.float32,
             "other_frac": np.float32,
             "other_chi2": np.float32,
             "other_n_classes": np.uint32,
@@ -1554,9 +1633,11 @@ def run_trial(
         "pure_train_chi2": pure_train_chi2,
         "test_chi2": test_chi2,
         "blip_train_chi2": blip_train_chi2,
+        "bitflip_chi2": bitflip_chi2,
         **_final_test_fracs,
         **_final_train_fracs,
-        "other_frac": float(final_class_counts[8] / FINAL_M),
+        "bitflip_frac": float(final_class_counts[8] / FINAL_M),
+        "other_frac": float(final_class_counts[9] / FINAL_M),
         "other_chi2": final_other_chi2,
         "other_n_classes": final_n_other_classes,
         "l1_loss": final_l1_loss,
