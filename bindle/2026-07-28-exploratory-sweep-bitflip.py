@@ -65,7 +65,8 @@ def do_watermark(mo, watermark):
 
 @app.cell(hide_code=True)
 def delimit_intro(mo):
-    mo.md("""
+    mo.md(
+        """
     # Exploratory sweep, bitflip blips (2026-07-28): double-descent analysis
 
     Downloads the collated timeseries parquet file for the
@@ -91,15 +92,18 @@ def delimit_intro(mo):
     `2026-07-27-exploratory-sweep`'s `blip_freq=0` condition), as is
     `blip_mode=random` (covered instead by
     `2026-07-27-exploratory-sweep-randomblip`).
-    """)
+    """
+    )
     return
 
 
 @app.cell(hide_code=True)
 def delimit_fetch_data(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Fetch data
-    """)
+    """
+    )
     return
 
 
@@ -159,9 +163,11 @@ def fetch_data(OSF_SLUGS, fetch_osf):
 
 @app.cell(hide_code=True)
 def delimit_load_data(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Load data
-    """)
+    """
+    )
     return
 
 
@@ -192,7 +198,8 @@ def describe_data(df):
 
 @app.cell(hide_code=True)
 def delimit_prep(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Prepare conditions
 
     A "condition" is one unique combination of the swept, non-model-size
@@ -202,7 +209,8 @@ def delimit_prep(mo):
     `blip_mode` is fixed to `bitflip` for every row in this dataset, so it
     isn't a swept condition here (contrast
     `2026-07-27-exploratory-sweep-randomblip`, which sweeps it).
-    """)
+    """
+    )
     return
 
 
@@ -241,7 +249,8 @@ def show_conditions(conditions, pd):
 
 @app.cell(hide_code=True)
 def delimit_plot_helpers(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Plotting helpers
 
     Phenotype classes `test1_frac`..`test8_frac` are the 8 canonical
@@ -263,7 +272,8 @@ def delimit_plot_helpers(mo):
     those 48). The stackplot below shows `bitflip_frac` as one gray
     slice, so gray reflects the full 48-variant population rather than
     just the 3 per-replicate-presented variants.
-    """)
+    """
+    )
     return
 
 
@@ -684,9 +694,11 @@ def compound_plot_fn(
 
 @app.cell(hide_code=True)
 def delimit_render(mo):
-    mo.md("""
+    mo.md(
+        """
     ## Compound plots by condition
-    """)
+    """
+    )
     return
 
 
