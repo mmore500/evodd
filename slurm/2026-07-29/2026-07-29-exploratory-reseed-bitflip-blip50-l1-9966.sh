@@ -27,14 +27,13 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # slurm/2026-07-27/2026-07-27-exploratory-sweep-randomblip.sh's OSF output,
 # osf.io/j3frh) -- fixing blip_freq=0.5 and blip_mode=bitflip (the defining
 # attributes of that artifact) as constants rather than swept dimensions,
-# and running a fresh, smaller sweep on top with 5 NEW seeds and 4
-# (l1_scale, l2_scale) mixes -- 3 NEW, plus the original job's own mix
-# folded back in unmodified for direct comparison (see below).
+# and running a fresh, smaller sweep on top with 5 NEW seeds and 3 NEW
+# (l1_scale, l2_scale) mixes not used by that original job.
 #
 # Variant of slurm/2026-07-29/2026-07-29-exploratory-reseed-bitflip-blip50.sh:
 # identical in every respect (blip_freq/blip_mode fixed, zero_init,
 # schedule_mode including "global", the uneven v/seed split, seeds 5-9,
-# NUM_EPOCH/generation budget) EXCEPT which (l1_scale, l2_scale) mixes are
+# NUM_EPOCH/generation budget) EXCEPT which 3 (l1_scale, l2_scale) mixes are
 # swept. That script's 3 mixes (0.995/0.005, 0.9933/0.0067, 0.925/0.075) are
 # widely spaced across the regularization range; this script instead zooms
 # in tightly around the original artifact's own l1_scale=0.9966 -- notably,
@@ -44,14 +43,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # properly-complementary mixes bracketing that value: l1_scale=0.9966 itself
 # (paired with its true complement l2_scale=0.0034 instead of the original
 # artifact's slightly-off 0.003), plus its immediate neighbors one
-# thousandth to either side, l1_scale=0.996 and l1_scale=0.997 -- PLUS a 4th
-# mix, l1_scale=0.9966/l2_scale=0.003, which is the original artifact's own
-# (non-complementary) mix verbatim (confirmed against
-# slurm/2026-07-27/2026-07-27-exploratory-sweep-randomblip.sh's
-# L1_SCALES=(1.0 0.999 0.9966 0.998)/L2_SCALES=(0.0 0.001 0.003 0.002)),
-# included so the properly-complementary 0.9966/0.0034 mix has a direct,
-# same-job side-by-side comparison against the exact mix that produced the
-# original teeplot artifact.
+# thousandth to either side, l1_scale=0.996 and l1_scale=0.997.
 #
 # Verified via git history (comparing the commit that added
 # slurm/2026-07-27/2026-07-27-exploratory-sweep-randomblip.sh against the
@@ -77,14 +69,10 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # Sweep: the single-trial elastic-net GRN notebook (v1..v20 double-descent
 # model), with blip_freq=0.5 and blip_mode=bitflip held fixed, across:
 #   - (l1_scale, l2_scale) in {(0.9966, 0.0034), (0.996, 0.004),
-#     (0.997, 0.003), (0.9966, 0.003)} -- the first 3 mixes follow
-#     l2_scale = 1 - l1_scale, matching this project's general convention,
-#     and are all NEW (not used by any prior sweep in this project,
-#     including 2026-07-29-exploratory-reseed-bitflip-blip50.sh's 3
-#     mixes); the 4th, (0.9966, 0.003), is NOT new -- it's the original
-#     randomblip job's own non-complementary mix (see above), included
-#     for direct comparison against the properly-complementary
-#     (0.9966, 0.0034) mix.                                             (4)
+#     (0.997, 0.003)} -- l2_scale = 1 - l1_scale throughout, matching this
+#     project's general convention; all 3 mixes are NEW (not used by any
+#     prior sweep in this project, including
+#     2026-07-29-exploratory-reseed-bitflip-blip50.sh's 3 mixes).       (3)
 #   - zero_init     in {True, False}                                (2)
 #   - schedule_mode in {none, local, global}                         (3)
 #     all three are already-supported values of the notebook's
@@ -97,8 +85,8 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 #   - v in {4, 8, 12, 16, 20}    -> 5 replicates each (seeds 5..9)    (5 v x 5 seed)
 #     seeds 5..9 are NEW -- every prior sweep in this project (including
 #     the original randomblip job) only ever used seeds 1..4.
-# total = 4 * 2 * 3 * (1*1 + 5*5) = 4 * 2 * 3 * 26 = 624 replicates
-# (24 for the v=0 block + 600 for the v-in-{4,8,12,16,20} block), i.e. 624
+# total = 3 * 2 * 3 * (1*1 + 5*5) = 3 * 2 * 3 * 26 = 468 replicates
+# (18 for the v=0 block + 450 for the v-in-{4,8,12,16,20} block), i.e. 468
 # (l1/l2 mix, zero_init, schedule_mode, v, seed) CONDITIONS -- there's no
 # separate "run under both/all X values" outer crossing here, since (unlike
 # the base sweeps) schedule_mode is swept directly within this same total
@@ -115,9 +103,9 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # 3600 * 138889 = 500,000,400 generations per replicate (400 over the
 # round-number target -- 3600 does not divide 500e6 evenly).
 #
-# The cluster caps a job array at 1000 queued tasks; at 624 total
+# The cluster caps a job array at 1000 queued tasks; at 468 total
 # replicates this job is comfortably under that cap even packed at
-# CHUNK=2 (312 array tasks), so -- unlike the base sweeps, which need
+# CHUNK=2 (234 array tasks), so -- unlike the base sweeps, which need
 # CHUNK=2 just to fit -- packing here is purely a throughput convenience
 # (2 concurrent replicates per array task, one CPU each, see
 # --cpus-per-task below) rather than a hard requirement. zero_init is
@@ -127,7 +115,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # base sweeps before schedule_mode itself grew to 3 values here) -- so
 # each array task's 2 concurrent replicates are the SAME (l1/l2 mix,
 # schedule_mode, v, seed) condition run under both zero_init values side
-# by side. This divides 624 replicates evenly into 624 / 2 = 312 array
+# by side. This divides 468 replicates evenly into 468 / 2 = 234 array
 # tasks.
 #
 # Global replicate index r in [0, N_TASKS) is split into two contiguous
@@ -146,7 +134,7 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 #     v_idx = (r' / N_ZERO / N_SCHEDULE) % N_V_REST;
 #     mix_idx = (r' / N_ZERO / N_SCHEDULE / N_V_REST) % N_MIX;
 #     seed_idx = r' / N_ZERO / N_SCHEDULE / N_V_REST / N_MIX.
-# N_TASKS_V0 (24) is itself a multiple of CHUNK=2, so no CHUNK-pair
+# N_TASKS_V0 (18) is itself a multiple of CHUNK=2, so no CHUNK-pair
 # straddles the v0/rest block boundary. Array task t owns the CHUNK
 # consecutive indices r = t * CHUNK + j for j in [0, CHUNK) (each
 # launched as a background job).
@@ -157,8 +145,8 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # even allowing for slower cluster CPUs.
 BLIP_FREQ=0.5
 BLIP_MODE=bitflip
-L1_SCALES=(0.9966 0.996 0.997 0.9966)
-L2_SCALES=(0.0034 0.004 0.003 0.003)
+L1_SCALES=(0.9966 0.996 0.997)
+L2_SCALES=(0.0034 0.004 0.003)
 ZERO_INITS=(True False)
 SCHEDULE_MODES=(none local global)
 V0_SEEDS=(5)
