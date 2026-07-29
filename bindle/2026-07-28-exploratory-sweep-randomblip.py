@@ -343,10 +343,10 @@ def compound_plot_fn(
         # since teeplot_dpi isn't tied to this figure's dpi.
         fig = plt.figure(figsize=(max(10, 2.0 * n_v), 24), dpi=32)
         gs = GridSpec(
-            5,
+            6,
             1,
             figure=fig,
-            height_ratios=[3, 2.4, 2.6, 2.4, 3.2],
+            height_ratios=[3, 2.4, 2.6, 2.4, 2.4, 3.2],
             hspace=0.55,
         )
 
@@ -581,13 +581,74 @@ def compound_plot_fn(
             frameon=False,
         )
 
-        # --- row 5: double descent heatmap -- training time (y) x model
+        # --- row 5: min-over-time training (actual) / testing loss vs
+        # model size v -- same convention as row 4, but each replicate
+        # contributes its own historical MINIMUM chi2 (independently per
+        # metric, over the whole trace) rather than its final recorded
+        # value, so a replicate that overshoots its best epoch and drifts
+        # back up doesn't erase that better result from view; median with
+        # a shaded [0th, 100th] percentile band across replicates per v,
+        # testing solid / training (actual) dashed to match rows 1/4's
+        # convention.
+        ax_min = fig.add_subplot(gs[4])
+        min_over_time = (
+            df_cond.groupby(["v", "seed"], observed=True)[
+                ["pure_train_chi2", "test_chi2"]
+            ]
+            .min()
+            .reset_index()
+        )
+        min_loss = (
+            min_over_time.groupby("v", observed=True)[
+                ["pure_train_chi2", "test_chi2"]
+            ]
+            .agg(["median", "min", "max"])
+            .reindex(v_values)
+        )
+        for metric_col, color, ls, label in (
+            ("test_chi2", "#1f77b4", "-", "testing"),
+            ("pure_train_chi2", "#d62728", "--", "training (actual)"),
+        ):
+            ax_min.plot(
+                v_values,
+                min_loss[(metric_col, "median")],
+                color=color,
+                ls=ls,
+                lw=1.8,
+                label=label,
+            )
+            ax_min.fill_between(
+                v_values,
+                min_loss[(metric_col, "min")],
+                min_loss[(metric_col, "max")],
+                color=color,
+                alpha=0.2,
+                lw=0,
+            )
+        ax_min.set_xlim(min(v_values), max(v_values))
+        ax_min.set_yscale("symlog", linthresh=CHI2_LINTHRESH)
+        ax_min.set_ylim(bottom=0)
+        _use_readable_symlog_ticks(ax_min.yaxis)
+        ax_min.set_xlabel("v (visible genes)")
+        ax_min.set_ylabel("chi$^2$ error")
+        ax_min.set_title(
+            "min-over-time training (actual) / testing loss vs model size",
+            fontsize=10,
+        )
+        ax_min.legend(
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            fontsize=7,
+            frameon=False,
+        )
+
+        # --- row 6: double descent heatmap -- training time (y) x model
         # size v (x), colored by median testing error. Colormap matches
         # the one used for the double descent heatmaps in Nakkiran et al.
         # 2019 ("Deep Double Descent", arXiv:1912.02292, Figure 2) --
         # matplotlib's viridis (dark purple = low error, yellow = high
         # error).
-        ax4 = fig.add_subplot(gs[4])
+        ax4 = fig.add_subplot(gs[5])
         grid = (
             df_cond.groupby(["generation", "v"], observed=True)["test_chi2"]
             .median()
