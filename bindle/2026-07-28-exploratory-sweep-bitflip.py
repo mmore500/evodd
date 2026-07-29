@@ -67,25 +67,31 @@ def do_watermark(mo, watermark):
 def delimit_intro(mo):
     mo.md(
         """
-    # Exploratory sweep, random blips (2026-07-27): double-descent analysis
+    # Exploratory sweep, bitflip blips (2026-07-28): double-descent analysis
 
     Downloads the collated timeseries parquet file for the
-    `2026-07-27-exploratory-sweep-randomblip` SLURM batch job (see
-    `slurm/2026-07-27/`) from OSF, then -- for each swept condition (blip
-    frequency, blip mode, L1/L2 regularization mix, zero-init, and
-    environment schedule mode) -- renders a compound plot summarizing
-    training/testing dynamics, phenotype composition, and double descent
-    across model size `v` and training time.
+    `2026-07-28-exploratory-sweep-bitflip` SLURM batch job (see
+    `slurm/2026-07-28/`) from OSF, then -- for each swept condition (blip
+    frequency, L1/L2 regularization mix, zero-init, and environment
+    schedule mode) -- renders a compound plot summarizing training/testing
+    dynamics, phenotype composition, and double descent across model size
+    `v` and training time.
 
-    Unlike `2026-07-27-exploratory-sweep`, this sweep exercises the
-    notebook's `--blip-mode` flag (see `build_schedule` in
-    `bindle/2026-07-23-exploratory.py`): instead of the 3 blip periods
-    always presenting a fixed, hand-picked single-bit-flip variant of
-    S1/S2/S3, each replicate here fixes (for its whole run) either a random
-    single-bit flip of each of S1/S2/S3 (`blip_mode=bitflip`) or an
-    entirely random +-1 phenotype for each blip slot
-    (`blip_mode=random`) -- in both cases, re-drawn if the result would
-    coincide with an actual training pattern or its sign-negation.
+    Variant of `2026-07-27-exploratory-sweep`: same swept knobs, the same
+    uneven `v`/`seed` structure (`v=0` at 1 replicate; `v` in
+    `{4, 8, 12, 16, 20}` at 4 replicates each), and the same
+    `schedule_mode` values, but every replicate here runs with the
+    notebook's `--blip-mode` fixed to `bitflip` (rather than the default
+    `fixed` hand-picked single-bit flip) -- each blip period presents a
+    per-replicate-fixed, uniformly-random single-bit flip of its training
+    pattern (see `make_blips`/`build_schedule` in
+    `bindle/2026-07-23-exploratory.py`), redrawn if it would coincide with
+    an actual training pattern or its sign-negation. `blip_freq=0` is
+    dropped from this sweep (`blip_mode` has no effect with no blips at
+    all -- that no-blip control is already covered by
+    `2026-07-27-exploratory-sweep`'s `blip_freq=0` condition), as is
+    `blip_mode=random` (covered instead by
+    `2026-07-27-exploratory-sweep-randomblip`).
     """
     )
     return
@@ -103,11 +109,11 @@ def delimit_fetch_data(mo):
 
 @app.cell
 def osf_slugs():
-    # https://osf.io/j3frh -- 2026-07-27-exploratory-sweep-randomblip
-    #   collated timeseries (blip_freq swept across {0.33, 0.5, 0.6, 0.66},
-    #   blip_mode swept across {bitflip, random})
+    # https://osf.io/83xgu -- 2026-07-28-exploratory-sweep-bitflip collated
+    #   timeseries (blip_freq swept across {0.33, 0.4, 0.45, 0.5},
+    #   blip_mode fixed to "bitflip")
     OSF_SLUGS = {
-        "exploratory-sweep-randomblip": "j3frh",
+        "exploratory-sweep-bitflip": "83xgu",
     }
     return (OSF_SLUGS,)
 
@@ -197,9 +203,12 @@ def delimit_prep(mo):
     ## Prepare conditions
 
     A "condition" is one unique combination of the swept, non-model-size
-    knobs (`blip_freq`, `blip_mode`, `l1_scale`, `l2_scale`, `zero_init`,
+    knobs (`blip_freq`, `l1_scale`, `l2_scale`, `zero_init`,
     `schedule_mode`) within a dataset -- everything except model size `v`
     (the double-descent x-axis) and `seed` (the replicate axis).
+    `blip_mode` is fixed to `bitflip` for every row in this dataset, so it
+    isn't a swept condition here (contrast
+    `2026-07-27-exploratory-sweep-randomblip`, which sweeps it).
     """
     )
     return
@@ -210,7 +219,6 @@ def prep_conditions(df, sns):
     CONDITION_COLS = [
         "dataset",
         "blip_freq",
-        "blip_mode",
         "l1_scale",
         "l2_scale",
         "zero_init",
@@ -252,9 +260,18 @@ def delimit_plot_helpers(mo):
     stackplot below stacks `test1_frac`..`test8_frac` (not the `train*`
     columns, which would double-count) and simply recolors the 3
     training-overlap slices distinctly from the other 5 test-only slices.
-    Blip-pattern matches (`s1_blip_match_frac`..`s3_blip_match_frac`) are a
-    subset of `other_frac`, so they're broken out of it rather than stacked
-    on top.
+
+    Unlike the `2026-07-27-exploratory-sweep`/`-randomblip` notebooks'
+    dataset, `classify_by_phenotype_output_masked` here carves a
+    dedicated "bitflip" bucket (`bitflip_frac`) out *before* falling
+    through to "other" -- so `bitflip_frac` and `other_frac` are disjoint
+    by construction, and `bitflip_frac` spans all 48 possible single-bit
+    transformations of the 3 training patterns (not just the one variant
+    actually presented as a blip target in a given replicate --
+    `s1_blip_match_frac`..`s3_blip_match_frac` -- which is only 3 of
+    those 48). The stackplot below shows `bitflip_frac` as one gray
+    slice, so gray reflects the full 48-variant population rather than
+    just the 3 per-replicate-presented variants.
     """
     )
     return
@@ -281,12 +298,12 @@ def plot_helpers(colorsys):
         dull("#f58231"),
         dull("#911eb4"),
     ]
-    GRAY_BLIP_COLORS = ["#404040", "#808080", "#bfbfbf"]
+    GRAY_BITFLIP_COLOR = "#808080"
     OTHER_COLOR = "#ffffff"
     return (
         BRIGHT_TRAIN_COLORS,
         DULL_TEST_COLORS,
-        GRAY_BLIP_COLORS,
+        GRAY_BITFLIP_COLOR,
         OTHER_COLOR,
         TEST_ONLY_IDX,
         TRAIN_OVERLAP_TEST_IDX,
@@ -297,7 +314,7 @@ def plot_helpers(colorsys):
 def compound_plot_fn(
     BRIGHT_TRAIN_COLORS,
     DULL_TEST_COLORS,
-    GRAY_BLIP_COLORS,
+    GRAY_BITFLIP_COLOR,
     GridSpec,
     GridSpecFromSubplotSpec,
     MaxNLocator,
@@ -467,8 +484,11 @@ def compound_plot_fn(
         # --- row 3: stackplot of testing phenotype distributions across v,
         # at each replicate's own final recorded generation. Bright =
         # training classes (overlap with test1/test4/test7), dull =
-        # test-only classes, grayscale = blip matches, white = remaining
-        # "other". Per-(v, seed) last-row (rather than a single shared max
+        # test-only classes, gray = the full "bitflip" bucket (any of the
+        # 48 possible single-bit transformations of the 3 training
+        # patterns, not just the 3 per-replicate-presented blip targets --
+        # see the plotting-helpers note above), white = residual "other".
+        # Per-(v, seed) last-row (rather than a single shared max
         # generation across the whole condition) since replicates can be
         # truncated at different generations by a SLURM timeout (see
         # bindle/2026-07-23-exploratory.py's progressive save-out).
@@ -479,41 +499,35 @@ def compound_plot_fn(
             .tail(1)
         )
         frac_cols = [f"test{i}_frac" for i in range(1, 9)]
-        blip_cols = [f"s{i}_blip_match_frac" for i in range(1, 4)]
         med = (
             final.groupby("v", observed=True)[
-                frac_cols + blip_cols + ["other_frac"]
+                frac_cols + ["bitflip_frac", "other_frac"]
             ]
             .median()
             .reindex(v_values)
         )
-        blip_sum = med[blip_cols].sum(axis=1)
-        # blip matches are a subset of "other" (they don't coincide with
-        # any of the 8 canonical CLASS_8 phenotypes) -- subtract them back
-        # out so the stack doesn't double-count; clip guards against
-        # floating-point/rare-coincidence edge cases.
-        other_only = (med["other_frac"] - blip_sum).clip(lower=0)
 
         train_layers = [med[f"test{i}_frac"] for i in TRAIN_OVERLAP_TEST_IDX]
         test_only_layers = [med[f"test{i}_frac"] for i in TEST_ONLY_IDX]
-        blip_layers = [med[c] for c in blip_cols]
 
-        stack = train_layers + test_only_layers + blip_layers + [other_only]
+        stack = (
+            train_layers
+            + test_only_layers
+            + [med["bitflip_frac"], med["other_frac"]]
+        )
         colors = (
             BRIGHT_TRAIN_COLORS
             + DULL_TEST_COLORS
-            + GRAY_BLIP_COLORS
-            + [OTHER_COLOR]
+            + [GRAY_BITFLIP_COLOR, OTHER_COLOR]
         )
         labels = (
             [f"train (test{i})" for i in TRAIN_OVERLAP_TEST_IDX]
             + [f"test-only (test{i})" for i in TEST_ONLY_IDX]
-            + [f"blip s{i}" for i in range(1, 4)]
-            + ["other"]
+            + ["bitflip (any of 48 variants)", "other"]
         )
         polys = ax3.stackplot(v_values, *stack, colors=colors, labels=labels)
-        # "other" is white -- outline it so it's visible against the
-        # figure background.
+        # "other" (last layer) is white -- outline it so it's visible
+        # against the figure background.
         polys[-1].set_edgecolor("black")
         polys[-1].set_linewidth(0.6)
         ax3.set_xlim(min(v_values), max(v_values))
@@ -716,7 +730,6 @@ def render_compound_plots(
     ---
     **dataset**=`{_cond['dataset']}`
     &nbsp;**blip_freq**=`{_cond['blip_freq']}`
-    &nbsp;**blip_mode**=`{_cond['blip_mode']}`
     &nbsp;**l1_scale**=`{_cond['l1_scale']}`
     &nbsp;**l2_scale**=`{_cond['l2_scale']}`
     &nbsp;**zero_init**=`{_cond['zero_init']}`
@@ -733,7 +746,6 @@ def render_compound_plots(
             teeplot_outattrs={
                 "dataset": str(_cond["dataset"]),
                 "blipfreq": str(_cond["blip_freq"]),
-                "blipmode": str(_cond["blip_mode"]),
                 "l1scale": str(_cond["l1_scale"]),
                 "l2scale": str(_cond["l2_scale"]),
                 "zeroinit": str(_cond["zero_init"]),
