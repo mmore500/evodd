@@ -26,35 +26,28 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # is fixed at 0.66 instead of 0.5, a value no prior sweep in this project
 # (whether blip_freq-sweeping or blip_freq-fixed) has yet tried. Unlike
 # those two siblings, this is NOT a reseed of any prior teeplot artifact --
-# it's a fresh (l1_scale, l2_scale) sweep at a new blip_freq. Narrower than
-# the -blip50/-l1-9966 siblings along every other swept axis: zero_init is
-# held fixed at True (not swept), schedule_mode drops "global" (only
-# {none, local}), and the v-in-{4,8,12,16,20} replicate count is reduced
-# from 5 seeds to 3.
+# it's a fresh (l1_scale, l2_scale) sweep at a new blip_freq.
 #
 # Sweep: the single-trial elastic-net GRN notebook (v1..v20 double-descent
-# model), with blip_freq=0.66, blip_mode=bitflip, and zero_init=True all
-# held fixed, across:
+# model), with blip_freq=0.66 and blip_mode=bitflip held fixed, across:
 #   - (l1_scale, l2_scale) in {(0.995, 0.005), (0.933, 0.067),
-#     (0.9925, 0.0075), (0.99, 0.01), (0.985, 0.015), (0.996, 0.004),
-#     (1.0, 0.0)} -- l2_scale = 1 - l1_scale throughout, matching this
-#     project's general convention; the last two mixes extend the
-#     original 5-mix set with a near-pure-L1 mix and the pure-L1 (no L2)
-#     extreme.                                                        (7)
-#   - schedule_mode in {none, local}                                  (2)
-#     "global" is dropped from this sweep (contrast the -blip50/-l1-9966
-#     siblings, which cover all three notebook --schedule-mode values).
+#     (0.9925, 0.0075), (0.99, 0.01), (0.985, 0.015)} -- l2_scale =
+#     1 - l1_scale throughout, matching this project's general convention (5)
+#   - zero_init     in {True, False}                                (2)
+#   - schedule_mode in {none, local, global}                         (3)
+#     matching the -blip50/-l1-9966 siblings' convention of covering all
+#     three already-supported values of the notebook's --schedule-mode
+#     flag (see weighted_interleave in bindle/2026-07-23-exploratory.py).
 # crossed with an UNEVEN v/seed split, matching the -blip50/-l1-9966
-# siblings' convention (v=0 gets fewer replicates than the rest), but with
-# fewer replicates per v than those siblings (3 seeds instead of 5):
+# siblings' convention (v=0 gets fewer replicates than the rest):
 #   - v = 0                      -> 1 replicate  (seed 5 only)       (1 v x 1 seed)
-#   - v in {4, 8, 12, 16, 20}    -> 3 replicates each (seeds 5..7)    (5 v x 3 seed)
-# total = 7 * 1 * 2 * (1*1 + 5*3) = 7 * 1 * 2 * 16 = 224 replicates
-# (14 for the v=0 block + 210 for the v-in-{4,8,12,16,20} block), i.e. 224
-# (l1/l2 mix, schedule_mode, v, seed) CONDITIONS -- there's no separate
-# "run under both/all X values" outer crossing here, since schedule_mode
-# is swept directly within this same total rather than doubling a smaller
-# per-schedule-mode replicate count.
+#   - v in {4, 8, 12, 16, 20}    -> 5 replicates each (seeds 5..9)    (5 v x 5 seed)
+# total = 5 * 2 * 3 * (1*1 + 5*5) = 5 * 2 * 3 * 26 = 780 replicates
+# (30 for the v=0 block + 750 for the v-in-{4,8,12,16,20} block), i.e. 780
+# (l1/l2 mix, zero_init, schedule_mode, v, seed) CONDITIONS -- there's no
+# separate "run under both/all X values" outer crossing here, since
+# schedule_mode is swept directly within this same total rather than
+# doubling/tripling a smaller per-schedule-mode replicate count.
 #
 # Generations vs. epochs: the notebook's SSWM loop runs
 # TOTAL_BLOCKS (fixed at 3600 inside the notebook, not CLI-configurable)
@@ -67,44 +60,39 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # 3600 * 138889 = 500,000,400 generations per replicate (400 over the
 # round-number target -- 3600 does not divide 500e6 evenly).
 #
-# The cluster caps a job array at 1000 queued tasks; at 224 total
+# The cluster caps a job array at 1000 queued tasks; at 780 total
 # replicates this job is comfortably under that cap even packed at
-# CHUNK=2 (112 array tasks), so -- unlike the base sweeps, which need
+# CHUNK=2 (390 array tasks), so -- unlike the base sweeps, which need
 # CHUNK=2 just to fit -- packing here is purely a throughput convenience
 # (2 concurrent replicates per array task, one CPU each, see
-# --cpus-per-task below) rather than a hard requirement. Unlike the
-# -blip50/-l1-9966 siblings (which pair on zero_init, since that's their
-# naturally size-2 swept axis), zero_init is fixed here (not swept), so
-# schedule_mode is deliberately the FASTEST-varying (innermost) dimension
-# in the index decomposition below instead, exactly matching CHUNK=2 (it's
-# now the one swept axis that's naturally size-2) -- so each array task's
-# 2 concurrent replicates are the SAME (l1/l2 mix, v, seed) condition run
-# under both schedule_mode values side by side. This divides 224
-# replicates evenly into 224 / 2 = 112 array tasks.
+# --cpus-per-task below) rather than a hard requirement. zero_init is
+# deliberately the FASTEST-varying (innermost) dimension in the index
+# decomposition below, exactly matching CHUNK=2 (it's the one swept axis
+# that's naturally size-2) -- so each array task's 2 concurrent replicates
+# are the SAME (l1/l2 mix, schedule_mode, v, seed) condition run under
+# both zero_init values side by side. This divides 780 replicates evenly
+# into 780 / 2 = 390 array tasks.
 #
 # Global replicate index r in [0, N_TASKS) is split into two contiguous
 # blocks rather than one uniform Cartesian product, since v=0 and the
 # rest of the v values don't share the same seed count. Both blocks
-# decompose fastest-varying first, starting with schedule_idx so it
-# aligns with CHUNK:
+# decompose fastest-varying first, starting with zero_idx so it aligns
+# with CHUNK:
 #   - r < N_TASKS_V0: the v=0 block (single seed).
-#     schedule_idx = r % N_SCHEDULE;
-#     zero_idx = (r / N_SCHEDULE) % N_ZERO;
-#     mix_idx = r / N_SCHEDULE / N_ZERO.
-#   - r >= N_TASKS_V0: the "rest" block (v in {4,8,12,16,20}, 3 seeds
+#     zero_idx = r % N_ZERO;
+#     schedule_idx = (r / N_ZERO) % N_SCHEDULE;
+#     mix_idx = r / N_ZERO / N_SCHEDULE.
+#   - r >= N_TASKS_V0: the "rest" block (v in {4,8,12,16,20}, 5 seeds
 #     each), re-based to r' = r - N_TASKS_V0.
-#     schedule_idx = r' % N_SCHEDULE;
-#     zero_idx = (r' / N_SCHEDULE) % N_ZERO;
-#     v_idx = (r' / N_SCHEDULE / N_ZERO) % N_V_REST;
-#     mix_idx = (r' / N_SCHEDULE / N_ZERO / N_V_REST) % N_MIX;
-#     seed_idx = r' / N_SCHEDULE / N_ZERO / N_V_REST / N_MIX.
-# zero_idx is still computed (as always 0, since N_ZERO=1) purely so the
-# decomposition/lookup code below stays structurally identical to the
-# -blip50/-l1-9966 siblings' -- only the axis order changed, not the
-# per-replicate logic. N_TASKS_V0 (14) is itself a multiple of CHUNK=2, so
-# no CHUNK-pair straddles the v0/rest block boundary. Array task t owns
-# the CHUNK consecutive indices r = t * CHUNK + j for j in [0, CHUNK)
-# (each launched as a background job).
+#     zero_idx = r' % N_ZERO;
+#     schedule_idx = (r' / N_ZERO) % N_SCHEDULE;
+#     v_idx = (r' / N_ZERO / N_SCHEDULE) % N_V_REST;
+#     mix_idx = (r' / N_ZERO / N_SCHEDULE / N_V_REST) % N_MIX;
+#     seed_idx = r' / N_ZERO / N_SCHEDULE / N_V_REST / N_MIX.
+# N_TASKS_V0 (30) is itself a multiple of CHUNK=2, so no CHUNK-pair
+# straddles the v0/rest block boundary. Array task t owns the CHUNK
+# consecutive indices r = t * CHUNK + j for j in [0, CHUNK) (each
+# launched as a background job).
 #
 # Benchmarked the notebook's core SSWM loop single-threaded (non-cluster
 # hardware) at ~83,000 generations/sec, so one 500M-generation replicate
@@ -112,12 +100,12 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # even allowing for slower cluster CPUs.
 BLIP_FREQ=0.66
 BLIP_MODE=bitflip
-L1_SCALES=(0.995 0.933 0.9925 0.99 0.985 0.996 1.0)
-L2_SCALES=(0.005 0.067 0.0075 0.01 0.015 0.004 0.0)
-ZERO_INITS=(True)
-SCHEDULE_MODES=(none local)
+L1_SCALES=(0.995 0.933 0.9925 0.99 0.985)
+L2_SCALES=(0.005 0.067 0.0075 0.01 0.015)
+ZERO_INITS=(True False)
+SCHEDULE_MODES=(none local global)
 V0_SEEDS=(5)
-REST_SEEDS=(5 6 7)
+REST_SEEDS=(5 6 7 8 9)
 V_REST=(4 8 12 16 20)
 N_MIX=${#L1_SCALES[@]}
 N_ZERO=${#ZERO_INITS[@]}
@@ -369,20 +357,20 @@ run_replicate() {
 
     if [ "\${gid}" -lt "${N_TASKS_V0}" ]; then
         # v=0 block: single seed, so no v/seed indexing needed.
-        local schedule_idx=\$((gid % ${N_SCHEDULE}))
-        local rem1=\$((gid / ${N_SCHEDULE}))
-        local zero_idx=\$((rem1 % ${N_ZERO}))
-        local rem2=\$((rem1 / ${N_ZERO}))
+        local zero_idx=\$((gid % ${N_ZERO}))
+        local rem1=\$((gid / ${N_ZERO}))
+        local schedule_idx=\$((rem1 % ${N_SCHEDULE}))
+        local rem2=\$((rem1 / ${N_SCHEDULE}))
         local mix_idx=\$((rem2 % ${N_MIX}))
         v=0
         seed="\${V0_SEEDS[0]}"
     else
         # "rest" block (v in {4,8,12,16,20}), re-based to start at 0.
         local rgid=\$((gid - ${N_TASKS_V0}))
-        local schedule_idx=\$((rgid % ${N_SCHEDULE}))
-        local rem1=\$((rgid / ${N_SCHEDULE}))
-        local zero_idx=\$((rem1 % ${N_ZERO}))
-        local rem2=\$((rem1 / ${N_ZERO}))
+        local zero_idx=\$((rgid % ${N_ZERO}))
+        local rem1=\$((rgid / ${N_ZERO}))
+        local schedule_idx=\$((rem1 % ${N_SCHEDULE}))
+        local rem2=\$((rem1 / ${N_SCHEDULE}))
         local v_idx=\$((rem2 % ${N_V_REST}))
         local rem3=\$((rem2 / ${N_V_REST}))
         local mix_idx=\$((rem3 % ${N_MIX}))
