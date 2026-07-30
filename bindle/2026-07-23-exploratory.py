@@ -119,9 +119,41 @@ def configure_trial(mo):
     # "random" both re-draw if the result would coincide with an actual
     # training pattern (or its sign-negation -- see build_schedule).
     blip_mode = _get("blip-mode", "fixed", lambda s: str(s).lower())
+    # blip_sites: the 3 bit positions (one per training pattern S1/S2/S3,
+    # 0-indexed into the N=16-dim phenotype) that blip_mode="fixed" flips
+    # -- default "0,4,8" reproduces the original hardcoded fixed-blip
+    # behavior; e.g. "0,0,0" flips all three patterns at the same site
+    # instead of one distinct site each. Ignored for blip_mode in
+    # ("bitflip", "random"), which don't use a caller-specified site.
+    blip_sites = _get(
+        "blip-sites",
+        (0, 4, 8),
+        lambda s: tuple(int(_x) for _x in str(s).split(",")),
+    )
+    assert len(blip_sites) == 3
+    # blip_release_prob: the probability, freshly drawn each time a blip
+    # is presented (blip_mode "fixed" or "bitflip" only -- see
+    # build_schedule/run_sswm), that THIS PARTICULAR blip occurrence
+    # "releases" its own flip site from selection against the blip's
+    # fixed (flipped) value -- instead of comparing to the flipped
+    # target, that site is scored against whatever value the organism
+    # ITSELF currently expresses there (see benefit's release_mask), so
+    # it always counts as a match, actively selecting for confidently
+    # expressing *some* value there without caring which one. With the
+    # complementary probability (1 - blip_release_prob), that occurrence
+    # scores normally against the blip's fixed flipped value, exactly
+    # like the original notebook. 0.0 (default) reproduces the original
+    # notebook's behavior exactly (every blip occurrence scored
+    # normally); 1.0 releases every blip occurrence; 0.5 releases
+    # roughly half of blip occurrences, independently drawn per
+    # occurrence, and normally scores the rest.
+    blip_release_prob = _get("blip-release-prob", 0.0, float)
+    assert 0.0 <= blip_release_prob <= 1.0
     return (
         blip_freq,
         blip_mode,
+        blip_release_prob,
+        blip_sites,
         l1_scale,
         l2_scale,
         num_epoch,
@@ -136,6 +168,8 @@ def configure_trial(mo):
 def show_config(
     blip_freq,
     blip_mode,
+    blip_release_prob,
+    blip_sites,
     l1_scale,
     l2_scale,
     num_epoch,
@@ -155,6 +189,8 @@ def show_config(
                 "l2_scale": l2_scale,
                 "blip_freq": blip_freq,
                 "blip_mode": blip_mode,
+                "blip_sites": blip_sites,
+                "blip_release_prob": blip_release_prob,
                 "num_epoch": num_epoch,
                 "schedule_mode": schedule_mode,
             }
@@ -192,11 +228,25 @@ def grn_core(njit, np):
         return p
 
     @njit(fastmath=True)
-    def benefit(Pa, S):
+    def benefit(Pa, S, release_mask):
+        # release_mask[i] = True "releases" site i from selection against
+        # the fixed target S[i] -- instead of comparing to S[i], that
+        # site's target is replaced by whatever the organism's OWN
+        # phenotype currently expresses there (sign(Pa_norm[i])), so it
+        # always scores as a match (its dot-product term becomes
+        # abs(Pa_norm[i]), the maximum either sign could contribute) --
+        # i.e. selection actively rewards confidently expressing SOME
+        # value at that site without caring which one. All-False for
+        # every non-blip (and non-desensitized blip) presentation,
+        # reducing to the original unmasked formula (dot/Pa.shape[0]
+        # unaffected -- the normalizing count never changes).
         Pa_norm = Pa / (TAU1 / TAU2)
         dot = 0.0
         for i in range(Pa.shape[0]):
-            dot += Pa_norm[i] * S[i]
+            if release_mask[i]:
+                dot += abs(Pa_norm[i])
+            else:
+                dot += Pa_norm[i] * S[i]
         return 0.5 * (1.0 + dot / Pa.shape[0])
 
     @njit(fastmath=True)
@@ -518,10 +568,10 @@ def masked_model_ext_elastic(
 
     @njit(fastmath=True)
     def fitness_output_masked_ext_elastic(
-        G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
+        G, B, S, lam1, lam2, w1, w2, visible_mask, n_score, release_mask
     ):
         Pa = develop_output_masked(G, B, visible_mask)
-        b = benefit(Pa[:n_score], S)
+        b = benefit(Pa[:n_score], S, release_mask)
         c = w1 * lam1 * l1_cost(B) + w2 * lam2 * l2_cost(B)
         return b - c
 
@@ -544,6 +594,8 @@ def masked_model_ext_elastic(
         G0,
         B0,
         training_set,
+        release_masks,
+        blip_release_prob,
         K,
         schedule,
         lam1,
@@ -565,6 +617,19 @@ def masked_model_ext_elastic(
         B = B0.copy()
         n_blocks = schedule.shape[0]
         total_gens = n_blocks * K
+        # Per-block (not per-generation) Bernoulli draw for whether THIS
+        # blip occurrence is released: a fresh coin is flipped only when
+        # the block index advances, so the decision holds for that
+        # block's full K-generation presentation rather than flickering
+        # generation-to-generation. never_release is the reusable
+        # all-zero mask for non-blip blocks and (1 - blip_release_prob)
+        # of blip blocks; short-circuiting on blip_release_prob > 0.0
+        # means blip_release_prob == 0.0 draws no extra random numbers at
+        # all, leaving the mutate()-only RNG stream (and hence every
+        # result) bit-for-bit identical to blip_release_prob absent.
+        never_release = np.zeros(n_score)
+        active_release_mask = never_release
+        last_block = -1
 
         # snapshot_blocks/timeseries_blocks are sorted-ascending, unique
         # block indices in [0, n_blocks] -- independent point sets, walked
@@ -604,12 +669,41 @@ def masked_model_ext_elastic(
             t_idx = schedule[block]
             S = training_set[t_idx]
 
+            if block != last_block:
+                last_block = block
+                if (
+                    t_idx >= 3
+                    and blip_release_prob > 0.0
+                    and np.random.random() < blip_release_prob
+                ):
+                    active_release_mask = release_masks[t_idx]
+                else:
+                    active_release_mask = never_release
+
             f = fitness_output_masked_ext_elastic(
-                G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
+                G,
+                B,
+                S,
+                lam1,
+                lam2,
+                w1,
+                w2,
+                visible_mask,
+                n_score,
+                active_release_mask,
             )
             Gp, Bp = mutate(G, B)
             fp = fitness_output_masked_ext_elastic(
-                Gp, Bp, S, lam1, lam2, w1, w2, visible_mask, n_score
+                Gp,
+                Bp,
+                S,
+                lam1,
+                lam2,
+                w1,
+                w2,
+                visible_mask,
+                n_score,
+                active_release_mask,
             )
             if fp > f:
                 G = Gp
@@ -722,10 +816,10 @@ def masked_model_zero_masked_elastic(
 
     @njit(fastmath=True)
     def fitness_output_masked_zero_masked_elastic(
-        G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
+        G, B, S, lam1, lam2, w1, w2, visible_mask, n_score, release_mask
     ):
         Pa = develop_output_masked_zero_masked(G, B, visible_mask)
-        b = benefit(Pa[:n_score], S)
+        b = benefit(Pa[:n_score], S, release_mask)
         c = w1 * lam1 * l1_cost(B) + w2 * lam2 * l2_cost(B)
         return b - c
 
@@ -748,6 +842,8 @@ def masked_model_zero_masked_elastic(
         G0,
         B0,
         training_set,
+        release_masks,
+        blip_release_prob,
         K,
         schedule,
         lam1,
@@ -769,6 +865,13 @@ def masked_model_zero_masked_elastic(
         B = B0.copy()
         n_blocks = schedule.shape[0]
         total_gens = n_blocks * K
+        # see run_sswm_output_masked_scheduled_traced_ext_elastic for the
+        # per-block (not per-generation) Bernoulli release draw and the
+        # short-circuit that keeps blip_release_prob == 0.0 bit-for-bit
+        # identical to the original (blip_release_prob-less) behavior.
+        never_release = np.zeros(n_score)
+        active_release_mask = never_release
+        last_block = -1
 
         # snapshot_blocks/timeseries_blocks are sorted-ascending, unique
         # block indices in [0, n_blocks] -- independent point sets, walked
@@ -808,12 +911,41 @@ def masked_model_zero_masked_elastic(
             t_idx = schedule[block]
             S = training_set[t_idx]
 
+            if block != last_block:
+                last_block = block
+                if (
+                    t_idx >= 3
+                    and blip_release_prob > 0.0
+                    and np.random.random() < blip_release_prob
+                ):
+                    active_release_mask = release_masks[t_idx]
+                else:
+                    active_release_mask = never_release
+
             f = fitness_output_masked_zero_masked_elastic(
-                G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
+                G,
+                B,
+                S,
+                lam1,
+                lam2,
+                w1,
+                w2,
+                visible_mask,
+                n_score,
+                active_release_mask,
             )
             Gp, Bp = mutate(G, B)
             fp = fitness_output_masked_zero_masked_elastic(
-                Gp, Bp, S, lam1, lam2, w1, w2, visible_mask, n_score
+                Gp,
+                Bp,
+                S,
+                lam1,
+                lam2,
+                w1,
+                w2,
+                visible_mask,
+                n_score,
+                active_release_mask,
             )
             if fp > f:
                 G = Gp
@@ -989,6 +1121,8 @@ def build_schedule(
     TRAINING_SET,
     blip_freq,
     blip_mode,
+    blip_release_prob,
+    blip_sites,
     np,
     schedule_mode,
     seed,
@@ -1007,31 +1141,35 @@ def build_schedule(
     def make_blips(rng):
         if blip_mode == "fixed":
             S1b = TRAINING_SET[0].copy()
-            S1b[0] *= -1
+            S1b[blip_sites[0]] *= -1
             S2b = TRAINING_SET[1].copy()
-            S2b[4] *= -1
+            S2b[blip_sites[1]] *= -1
             S3b = TRAINING_SET[2].copy()
-            S3b[8] *= -1
-            return S1b, S2b, S3b
+            S3b[blip_sites[2]] *= -1
+            return (S1b, S2b, S3b), tuple(blip_sites)
 
         assert blip_mode in ("bitflip", "random")
         _n = TRAINING_SET.shape[1]
         blips = []
+        sites = []
         for _i in range(3):
             while True:
                 if blip_mode == "bitflip":
+                    _site = int(rng.integers(0, _n))
                     _candidate = TRAINING_SET[_i].copy()
-                    _candidate[rng.integers(0, _n)] *= -1
+                    _candidate[_site] *= -1
                 else:
+                    _site = -1
                     _candidate = rng.choice(np.array([-1.0, 1.0]), size=_n)
                 if not _is_training_member(_candidate, TRAINING_SET):
                     blips.append(_candidate)
+                    sites.append(_site)
                     break
-        return tuple(blips)
+        return tuple(blips), tuple(sites)
 
     assert blip_mode in ("fixed", "bitflip", "random")
     _blip_rng = np.random.default_rng(seed)
-    S1b, S2b, S3b = make_blips(_blip_rng)
+    (S1b, S2b, S3b), blip_sites_used = make_blips(_blip_rng)
     training_set = np.vstack([TRAINING_SET.astype(np.float64), S1b, S2b, S3b])
     BLIP_SET = np.stack([S1b, S2b, S3b])
 
@@ -1052,7 +1190,40 @@ def build_schedule(
         blip_counts, schedule_mode=schedule_mode, rng=_rng
     )
     assert schedule.shape[0] == TOTAL_BLOCKS
-    return BLIP_SET, blip_counts, schedule, training_set
+
+    # release_masks[t_idx] gives the score-position release mask to apply
+    # WHEN environment t_idx (0..2 = true S1/S2/S3, 3..5 = blip
+    # S1b/S2b/S3b) is released -- see run_sswm's per-block Bernoulli draw
+    # (gated by blip_release_prob) for WHETHER a given blip occurrence
+    # actually uses it. True-pattern rows are always all-zero (never
+    # released). Blip rows mark their own flip site (from
+    # blip_sites_used) for release: benefit() then scores that site
+    # against the organism's OWN current phenotype instead of the blip's
+    # fixed (flipped) value, so selection rewards confidently expressing
+    # some value there without preferring either sign. Built
+    # unconditionally whenever a discrete site exists (harmless if
+    # blip_release_prob ends up 0, since it's then never looked up);
+    # blip_mode="random" has no discrete site, so its rows are left
+    # all-zero and blip_release_prob > 0 is rejected outright for it.
+    _n_score = TRAINING_SET.shape[1]
+    release_masks = np.zeros((6, _n_score), dtype=np.float64)
+    if blip_release_prob > 0.0:
+        assert blip_mode in ("fixed", "bitflip"), (
+            "blip_release_prob > 0 requires a single-bit blip site "
+            "(blip_mode='fixed' or 'bitflip'); blip_mode='random' has no "
+            "single site to release from selection"
+        )
+    if blip_mode in ("fixed", "bitflip"):
+        for _bi, _site in enumerate(blip_sites_used):
+            release_masks[3 + _bi, _site] = 1.0
+    return (
+        BLIP_SET,
+        blip_counts,
+        blip_sites_used,
+        release_masks,
+        schedule,
+        training_set,
+    )
 
 
 @app.cell
@@ -1209,6 +1380,8 @@ def run_trial(
     append_npz_array,
     blip_freq,
     blip_mode,
+    blip_release_prob,
+    blip_sites_used,
     compute_errors_output_masked_ext,
     compute_errors_output_masked_zero_masked,
     contextlib,
@@ -1221,6 +1394,7 @@ def run_trial(
     np,
     num_epoch,
     pd,
+    release_masks,
     run_sswm_output_masked_scheduled_traced_ext_elastic,
     run_sswm_output_masked_scheduled_traced_zero_masked_elastic,
     schedule,
@@ -1302,6 +1476,8 @@ def run_trial(
         "l2scale": _w2,
         "blipfreq": blip_freq,
         "blipmode": blip_mode,
+        "blipsites": "-".join(str(_s) for _s in blip_sites_used),
+        "bliprelprob": blip_release_prob,
         "numepoch": _K,
         "schedulemode": schedule_mode,
         "replicate": replicate_uid,
@@ -1348,6 +1524,8 @@ def run_trial(
             "l2_scale",
             "blip_freq",
             "blip_mode",
+            "blip_sites",
+            "blip_release_prob",
             "num_epoch",
             "schedule_mode",
             "replicate_uid",
@@ -1401,6 +1579,8 @@ def run_trial(
         _row["l2_scale"] = _w2
         _row["blip_freq"] = blip_freq
         _row["blip_mode"] = blip_mode
+        _row["blip_sites"] = "-".join(str(_s) for _s in blip_sites_used)
+        _row["blip_release_prob"] = blip_release_prob
         _row["num_epoch"] = _K
         _row["schedule_mode"] = schedule_mode
         _row["replicate_uid"] = replicate_uid
@@ -1526,6 +1706,8 @@ def run_trial(
                 _G0,
                 _B0,
                 training_set,
+                release_masks,
+                blip_release_prob,
                 _K,
                 schedule,
                 LAM1,
@@ -1604,11 +1786,13 @@ def run_trial(
             "l1_scale": np.float32,
             "l2_scale": np.float32,
             "blip_freq": np.float32,
+            "blip_release_prob": np.float32,
             "num_epoch": np.uint32,
         }
     )
     trace_df["schedule_mode"] = pd.Categorical(trace_df["schedule_mode"])
     trace_df["blip_mode"] = pd.Categorical(trace_df["blip_mode"])
+    trace_df["blip_sites"] = pd.Categorical(trace_df["blip_sites"])
     trace_df["replicate_uid"] = pd.Categorical(trace_df["replicate_uid"])
 
     _final_test_fracs = {
@@ -1629,6 +1813,8 @@ def run_trial(
         "l2_scale": _w2,
         "blip_freq": blip_freq,
         "blip_mode": blip_mode,
+        "blip_sites": "-".join(str(_s) for _s in blip_sites_used),
+        "blip_release_prob": blip_release_prob,
         "schedule_mode": schedule_mode,
         "pure_train_chi2": pure_train_chi2,
         "test_chi2": test_chi2,
