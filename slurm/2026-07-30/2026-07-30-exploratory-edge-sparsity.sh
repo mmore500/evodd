@@ -43,9 +43,10 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 #     degenerate/uninformative. The remaining 99 points keep the same
 #     1/99 spacing as a full 100-point [0, 1] linspace, just missing that
 #     one endpoint.
-#   - (l1_scale, l2_scale) in {(0.995, 0.005), (0.0, 1.0)}
-#     i.e. "with L1" (the notebook's own default mix) vs. "without L1"
-#     (pure L2, l1_scale=0 so the L1 term contributes nothing)            (2)
+#   - (l1_scale, l2_scale) in {(1.0, 0.0), (0.0, 0.0)}
+#     "with L1" (pure L1, l2_scale=0 so the L2 term contributes nothing)
+#     vs. "without L1" (NEITHER term contributes -- l1_scale=l2_scale=0,
+#     i.e. no regularization at all, not a swap to pure L2)               (2)
 #   - n_classes   in {3, 5}
 #     3-class is this project's original training set {S1, S2, S3}
 #     (CLASS_8[[0,3,6]]); 5-class adds CLASS_8[[1,7]] (see the notebook's
@@ -100,8 +101,8 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # full 100-point [0, 1] linspace would have, just dropping that one
 # endpoint.
 DENSITIES=($(awk 'BEGIN { for (i = 1; i < 100; i++) printf "%.6f ", i / 99 }'))
-L1_SCALES=(0.995 0.0)
-L2_SCALES=(0.005 1.0)
+L1_SCALES=(1.0 0.0)
+L2_SCALES=(0.0 0.0)
 N_CLASSES_VALUES=(3 5)
 SEEDS=(1 2 3 4 5 6 7 8 9 10)
 N_DENSITY=${#DENSITIES[@]}
