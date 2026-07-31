@@ -522,7 +522,10 @@ def render_test_loss_over_time(
         N_CLASSES_VALUES,
         "test_chi2",
         "testing",
-        teeplot_outattrs={"dataset": "exploratory-edge-sparsity"},
+        teeplot_outattrs={
+            "dataset": "exploratory-edge-sparsity",
+            "metric": "test",
+        },
         teeplot_subdir=pathlib.Path(__file__).stem,
         teeplot_show=False,
     ) as _fig:
@@ -550,7 +553,10 @@ def render_train_loss_over_time(
         N_CLASSES_VALUES,
         "pure_train_chi2",
         "training (actual)",
-        teeplot_outattrs={"dataset": "exploratory-edge-sparsity"},
+        teeplot_outattrs={
+            "dataset": "exploratory-edge-sparsity",
+            "metric": "train",
+        },
         teeplot_subdir=pathlib.Path(__file__).stem,
         teeplot_show=False,
     ) as _fig:
