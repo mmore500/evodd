@@ -32,9 +32,17 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 #     regulatory edges (the notebook's --density flag), fixed for the
 #     whole replicate -- see the notebook's "Edge sparsity" section.
 # Swept across:
-#   - density     in 100 evenly-spaced values across [0, 1]              (100)
+#   - density     in 99 evenly-spaced values across (0, 1]               (99)
 #     (fraction of the 256 edges RETAINED; density=1 -> dense/no edges
-#     zeroed, density=0 -> fully disconnected/all 256 edges zeroed)
+#     zeroed). density=0 (all 256 edges zeroed) is deliberately EXCLUDED:
+#     at that point B is permanently all-zero (edge_mask zeroes every
+#     entry regardless of seed), so l1_cost/l2_cost are always 0 --
+#     making the l1/l2 mix axis a no-op -- and the GRN can't discriminate
+#     any pattern regardless of n_classes either, so all 40 replicates
+#     that condition would occupy (10 seeds x 2 mixes x 2 n_classes) are
+#     degenerate/uninformative. The remaining 99 points keep the same
+#     1/99 spacing as a full 100-point [0, 1] linspace, just missing that
+#     one endpoint.
 #   - (l1_scale, l2_scale) in {(0.995, 0.005), (0.0, 1.0)}
 #     i.e. "with L1" (the notebook's own default mix) vs. "without L1"
 #     (pure L2, l1_scale=0 so the L1 term contributes nothing)            (2)
@@ -45,9 +53,9 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # crossed with 10 replicate seeds per density (uniform -- unlike the
 # v-sweep scripts, there's no uneven "v=0 gets fewer replicates" special
 # case here, since density doesn't have an analogous degenerate-value
-# asymmetry):
+# asymmetry once density=0 itself is excluded):
 #   - seed in {1..10}                                                    (10)
-# total = 100 * 2 * 2 * 10 = 4000 replicates.
+# total = 99 * 2 * 2 * 10 = 3960 replicates.
 #
 # Generations vs. epochs: the notebook's SSWM loop runs
 # TOTAL_BLOCKS (fixed at 3600 inside the notebook, not CLI-configurable)
@@ -63,11 +71,13 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # The cluster caps a job array at 1000 queued tasks, so we pack
 # CHUNK=4 (= N_MIX * N_NCLASSES, the fastest-varying full cross of the
 # two size-2 axes) replicates into each array task and run those 4
-# *concurrently* (one CPU each, see --cpus-per-task below) rather than
+# *concurrently* (one CPU each, so --cpus-per-task below always equals
+# the actual number of concurrently-launched replicates) rather than
 # sequentially -- each array task's 4 concurrent replicates are the SAME
 # (density, seed) pair run under all 4 (l1/l2 mix, n_classes)
-# combinations side by side. This divides 4000 replicates evenly into
-# 4000 / 4 = 1000 array tasks, exactly at (not over) the 1000-task cap.
+# combinations side by side. This divides 3960 replicates evenly into
+# 3960 / 4 = 990 array tasks (no partial final chunk), comfortably under
+# the 1000-task cap.
 #
 # Global replicate index r in [0, N_TASKS) decomposes fastest-varying
 # first, matching CHUNK:
@@ -85,7 +95,11 @@ echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 # hardware) at ~70,000-83,000 generations/sec, so one 500M-generation
 # replicate takes ~100-120 minutes -- comfortably inside the 4-hour job
 # time limit below even allowing for slower cluster CPUs.
-DENSITIES=($(awk 'BEGIN { for (i = 0; i < 100; i++) printf "%.6f ", i / 99 }'))
+# i starts at 1 (not 0) to exclude density=0 (the degenerate "0 edges
+# retained" case -- see above), so this keeps the same 1/99 spacing a
+# full 100-point [0, 1] linspace would have, just dropping that one
+# endpoint.
+DENSITIES=($(awk 'BEGIN { for (i = 1; i < 100; i++) printf "%.6f ", i / 99 }'))
 L1_SCALES=(0.995 0.0)
 L2_SCALES=(0.005 1.0)
 N_CLASSES_VALUES=(3 5)
