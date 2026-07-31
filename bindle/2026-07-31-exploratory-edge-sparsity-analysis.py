@@ -321,30 +321,36 @@ def final_loss_plot_fn(GridSpec, MaxNLocator, ScalarFormatter, plt):
                     .agg(["median", "min", "max"])
                     .reindex(n_values)
                 )
-                for metric_col, color, ls, label in (
-                    ("test_chi2", "#1f77b4", "-", "testing"),
+                # line_color deliberately contrasts with (rather than
+                # matches) its own band_color -- complementary-ish hues,
+                # not just the same color at different alpha -- so the
+                # median line stays legible against a wide/overlapping
+                # min-max band instead of blending into it.
+                for metric_col, line_color, band_color, ls, label in (
+                    ("test_chi2", "#e6550d", "#1f77b4", "-", "testing"),
                     (
                         "pure_train_chi2",
+                        "#238b45",
                         "#d62728",
                         "--",
                         "training (actual)",
                     ),
                 ):
-                    ax.plot(
-                        n_values,
-                        agg[(metric_col, "median")],
-                        color=color,
-                        ls=ls,
-                        lw=1.6,
-                        label=label,
-                    )
                     ax.fill_between(
                         n_values,
                         agg[(metric_col, "min")],
                         agg[(metric_col, "max")],
-                        color=color,
+                        color=band_color,
                         alpha=0.2,
                         lw=0,
+                    )
+                    ax.plot(
+                        n_values,
+                        agg[(metric_col, "median")],
+                        color=line_color,
+                        ls=ls,
+                        lw=1.6,
+                        label=label,
                     )
                 ax.set_yscale("symlog", linthresh=CHI2_LINTHRESH)
                 ax.set_ylim(bottom=0)
