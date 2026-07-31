@@ -64,9 +64,10 @@ def delimit_intro(mo):
     simplifications for this sweep:
 
     - **No blips.** Every training block presents one of the actual
-      training patterns (round-robin cycling through the `n_classes`-item
-      training set); there's no blip-target substitution or
-      `blip_freq`/`blip_mode` axis.
+      training patterns (by default round-robin cycling through the
+      `n_classes`-item training set, or non-uniformly under
+      `--doubled-class`; see "Training schedule" below); there's no
+      blip-target substitution or `blip_freq`/`blip_mode` axis.
     - **No `v`/visible-gene masking (and so no `zero_init` axis either).**
       All 16 genes are always visible; instead, "model size" is
       controlled by zeroing out a random subset of the GRN's 256 possible
@@ -75,7 +76,9 @@ def delimit_intro(mo):
 
     Also introduces an `--n-classes` axis (3 vs. 5 canonical training
     phenotypes; see "Training set" below), crossed with an
-    L1-regularization on/off axis via `--l1-scale`/`--l2-scale`.
+    L1-regularization on/off axis via `--l1-scale`/`--l2-scale`, and an
+    optional `--doubled-class` axis that presents one training pattern
+    twice as often as the others (uniform by default).
 
     Self-contained: every model definition (Kouvaris et al. 2017 GRN
     core, target patterns, elastic-net SSWM) is inlined below rather than
@@ -117,17 +120,40 @@ def configure_trial(mo):
     l2_scale = _get("l2-scale", 0.005, float)
     n_classes = _get("n-classes", 3, int)
     num_epoch = _get("num-epoch", 100, int)
-    return density, l1_scale, l2_scale, n_classes, num_epoch, seed
+    # -1 (default) = uniform presentation; else the 0-indexed position
+    # within the training set (train_idx/training_set) that gets DOUBLE
+    # the presentation weight of the other n_classes-1 patterns -- see
+    # "Training schedule" below.
+    doubled_class = _get("doubled-class", -1, int)
+    return (
+        density,
+        doubled_class,
+        l1_scale,
+        l2_scale,
+        n_classes,
+        num_epoch,
+        seed,
+    )
 
 
 @app.cell
-def show_config(density, l1_scale, l2_scale, n_classes, num_epoch, pd, seed):
+def show_config(
+    density,
+    doubled_class,
+    l1_scale,
+    l2_scale,
+    n_classes,
+    num_epoch,
+    pd,
+    seed,
+):
     config_df = pd.DataFrame(
         [
             {
                 "seed": seed,
                 "density": density,
                 "n_classes": n_classes,
+                "doubled_class": doubled_class,
                 "l1_scale": l1_scale,
                 "l2_scale": l2_scale,
                 "num_epoch": num_epoch,
@@ -282,10 +308,16 @@ def generalisation_core(MOD_A, np):
         mod4_match = np.all(signs[:, 12:16] == _CANONICAL_MOD4, axis=1)
         return np.where(mod4_match[:, None], Pa_batch, -Pa_batch)
 
-    def chi_squared(counts, M):
+    def chi_squared(counts, M, expected=None):
+        # expected defaults to uniform (1/k each) -- pass an array
+        # aligned with counts (summing to 1) for a non-uniform reference
+        # distribution, e.g. pure_train_chi2 under --doubled-class (see
+        # "Training schedule" below), where the "correct" distribution
+        # isn't uniform across the training classes.
         k = counts.shape[0]
         freq = counts / M
-        expected = 1.0 / k
+        if expected is None:
+            expected = 1.0 / k
         return float(np.sum((freq - expected) ** 2 / expected))
 
     return chi_squared, fold_to_canonical
@@ -315,6 +347,11 @@ def delimit_training_set(mo):
     additional `m1==m2` phenotypes bracketing `S1`/`S3` in `CLASS_8`'s
     index order (`S2`/`class4` is the sole `m1!=m2` member of both
     training sets).
+
+    `train_idx` (0-indexed, in the order listed above -- e.g. for
+    `n_classes=3` position 0/1/2 is S1/S2/S3 respectively) is also how
+    `--doubled-class` (see "Training schedule" below) selects which
+    single pattern gets presented twice as often as the others.
     """
     )
     return
@@ -660,7 +697,7 @@ def edge_masked_model(
 
         return G, B
 
-    def compute_errors_edge_masked(B, seed, M, train_idx):
+    def compute_errors_edge_masked(B, seed, M, train_idx, train_class_probs):
         G_batch = sample_G(M, seed, n=N)
         Pa_batch = develop_batch(G_batch, B)
         (
@@ -670,7 +707,10 @@ def edge_masked_model(
         ) = classify_by_phenotype(Pa_batch)
         train_counts = class_counts[train_idx]
         return (
-            chi_squared(train_counts, M),
+            # scored against the ACTUAL presentation weights (uniform
+            # unless --doubled-class is set), not always uniform -- see
+            # build_round_robin_schedule's train_class_probs.
+            chi_squared(train_counts, M, expected=train_class_probs),
             chi_squared(class_counts[:8], M),
             class_counts,
             other_chi2,
@@ -726,20 +766,68 @@ def delimit_schedule(mo):
 
     No blip environments here (contrast the blip-sweep notebooks in this
     project) -- every block presents one of the `n_classes` actual
-    training patterns, cycled round-robin (`block_idx % n_classes`) so
-    each pattern gets exactly `TOTAL_BLOCKS / n_classes` blocks.
-    `TOTAL_BLOCKS` (3600, fixed above) is divisible by both supported
-    `n_classes` values (3 and 5), so the split is always exactly even.
+    training patterns. By default (`--doubled-class -1`) each pattern is
+    presented equally often, `TOTAL_BLOCKS / n_classes` blocks apiece
+    (`TOTAL_BLOCKS=3600`, fixed above, is divisible by both supported
+    `n_classes` values, 3 and 5). `--doubled-class` optionally names ONE
+    training-set position (0-indexed into `train_idx`/`training_set` --
+    for `n_classes=3` that's S1/S2/S3 respectively) to present TWICE as
+    often as each of the other `n_classes - 1` patterns -- e.g.
+    `--doubled-class 0` with `n_classes=3` gives presentation weights
+    `[2, 1, 1]`, i.e. block counts `[1800, 900, 900]` out of 3600 total.
+    Either way, blocks are deterministically interleaved (greedy
+    fair-queueing, breaking ties toward the lowest class index -- the
+    same "none" `schedule_mode` behavior this project's earlier
+    blip-sweep notebooks used, inlined here since there's no
+    `schedule_mode` axis otherwise) rather than grouped into contiguous
+    runs, so a doubled class's extra blocks are spread evenly across the
+    whole run instead of front- or back-loaded.
+
+    `pure_train_chi2` (see `compute_errors_edge_masked` above) is scored
+    against these SAME presentation weights (`train_class_probs` below,
+    normalized to sum to 1) rather than always assuming uniform -- under
+    `--doubled-class`, a genotype population that reproduces the doubled
+    class twice as often as the other two is the perfect match, not a
+    "biased" one.
     """
     )
     return
 
 
 @app.cell
-def build_round_robin_schedule(TOTAL_BLOCKS, n_classes, np):
-    assert TOTAL_BLOCKS % n_classes == 0
-    schedule = np.arange(TOTAL_BLOCKS, dtype=np.int64) % n_classes
-    return (schedule,)
+def build_round_robin_schedule(TOTAL_BLOCKS, doubled_class, n_classes, np):
+    assert doubled_class in range(-1, n_classes), doubled_class
+    weights = np.ones(n_classes, dtype=np.int64)
+    if doubled_class >= 0:
+        weights[doubled_class] = 2
+    assert TOTAL_BLOCKS % weights.sum() == 0
+    counts = weights * (TOTAL_BLOCKS // weights.sum())
+    assert counts.sum() == TOTAL_BLOCKS
+
+    schedule = np.empty(TOTAL_BLOCKS, dtype=np.int64)
+    appeared = np.zeros(n_classes, dtype=np.int64)
+    for step in range(TOTAL_BLOCKS):
+        deficits = (counts / TOTAL_BLOCKS) * (step + 1) - appeared
+        i = int(np.argmax(deficits))
+        schedule[step] = i
+        appeared[i] += 1
+    assert (appeared == counts).all()
+
+    train_class_probs = counts / TOTAL_BLOCKS
+    return schedule, train_class_probs
+
+
+@app.cell
+def show_schedule(pd, train_class_probs, train_idx):
+    schedule_df = pd.DataFrame(
+        {
+            "train_idx_position": range(len(train_idx)),
+            "class8_idx": train_idx,
+            "train_class_probs": train_class_probs,
+        }
+    )
+    schedule_df
+    return
 
 
 @app.cell(hide_code=True)
@@ -883,6 +971,7 @@ def run_trial(
     compute_errors_edge_masked,
     contextlib,
     density,
+    doubled_class,
     edge_mask,
     kn,
     l1_cost,
@@ -901,6 +990,7 @@ def run_trial(
     threading,
     time,
     train_class_idx_str,
+    train_class_probs,
     train_idx,
     training_set,
     uuid,
@@ -951,6 +1041,7 @@ def run_trial(
         "density": density,
         "nzeroedges": n_zero_edges,
         "nclasses": n_classes,
+        "doubledclass": doubled_class,
         "seed": _seed,
         "l1scale": _w1,
         "l2scale": _w2,
@@ -991,6 +1082,7 @@ def run_trial(
             "density",
             "n_zero_edges",
             "n_classes",
+            "doubled_class",
             "seed",
             "l1_scale",
             "l2_scale",
@@ -1008,7 +1100,7 @@ def run_trial(
         # the actual weighted penalty subtracted from benefit in the
         # fitness function driving evolution.
         (_ptr, _te, _cc, _oc, _noc,) = compute_errors_edge_masked(
-            _B_trace[_i], _seed + 2000, _TRACE_M, train_idx
+            _B_trace[_i], _seed + 2000, _TRACE_M, train_idx, train_class_probs
         )
         _l1 = l1_cost(_B_trace[_i])
         _l2 = l2_cost(_B_trace[_i])
@@ -1036,6 +1128,7 @@ def run_trial(
         _row["density"] = density
         _row["n_zero_edges"] = n_zero_edges
         _row["n_classes"] = n_classes
+        _row["doubled_class"] = doubled_class
         _row["seed"] = _seed
         _row["l1_scale"] = _w1
         _row["l2_scale"] = _w2
@@ -1201,7 +1294,9 @@ def run_trial(
         final_class_counts,
         final_other_chi2,
         final_n_other_classes,
-    ) = compute_errors_edge_masked(_B, _seed + 1000, FINAL_M, train_idx)
+    ) = compute_errors_edge_masked(
+        _B, _seed + 1000, FINAL_M, train_idx, train_class_probs
+    )
     assert final_class_counts.sum() == FINAL_M
     final_l1_loss = l1_cost(_B)
     final_l2_loss = l2_cost(_B)
@@ -1227,6 +1322,7 @@ def run_trial(
             "density": np.float32,
             "n_zero_edges": np.uint16,
             "n_classes": np.uint8,
+            "doubled_class": np.int8,
             "seed": np.uint32,
             "l1_scale": np.float32,
             "l2_scale": np.float32,
@@ -1245,6 +1341,7 @@ def run_trial(
         "density": density,
         "n_zero_edges": n_zero_edges,
         "n_classes": n_classes,
+        "doubled_class": doubled_class,
         "seed": _seed,
         "num_epoch": _K,
         "l1_scale": _w1,
