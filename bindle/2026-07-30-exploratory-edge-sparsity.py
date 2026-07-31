@@ -700,8 +700,12 @@ def model_constants(os):
     LAM1 = 0.22
     LAM2 = 38.0
     TOTAL_BLOCKS = 3600
-    N_SNAPSHOT_TARGET = 100
-    N_TIMESERIES_TARGET = 1_000
+    # sampling-over-time density, 20-fold lower than the v-sweep notebooks'
+    # 100/1_000 (fewer recorded points per replicate, since this sweep has
+    # far more replicates -- 3960 vs. the low hundreds in prior sweeps --
+    # and per-replicate output size scales directly with these targets).
+    N_SNAPSHOT_TARGET = 5
+    N_TIMESERIES_TARGET = 50
     OUTPUT_DIR = "dd_trial_outputs"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     return (
