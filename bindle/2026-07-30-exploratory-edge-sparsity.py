@@ -55,27 +55,42 @@ def do_watermark(mo, watermark):
 def delimit_intro(mo):
     mo.md(
         """
-    # Single-trial elastic-net GRN run (self-contained, parameterizable)
+    # Single-trial elastic-net GRN run: edge-sparsity model-size sweep, no blips
 
-    One trial = one (v, L1 scale, L2 scale, seed, zero-init, blip freq,
-    num_epoch) combination from `run_output_masked_k100k_dd_heatmap.py`'s
-    v1..v20 double-descent batch sweep, pulled out so a single condition can
-    be inspected/tuned without launching the full batch job. Self-contained:
-    every model definition (Kouvaris et al. 2017 GRN core, target patterns,
-    masked development, elastic-net SSWM) is inlined below rather than
-    imported from the surrounding project, so this file has no dependency on
-    any other file in this repository -- only installable packages
+    One trial = one (density, seed, n_classes, L1 scale, L2 scale,
+    num_epoch) combination. Adapted from the `v`-sweep/blip-sweep family
+    of notebooks in this project (see e.g.
+    `bindle/2026-07-23-exploratory.py`), but with two deliberate
+    simplifications for this sweep:
+
+    - **No blips.** Every training block presents one of the actual
+      training patterns (by default round-robin cycling through the
+      `n_classes`-item training set, or non-uniformly under
+      `--doubled-class`; see "Training schedule" below); there's no
+      blip-target substitution or `blip_freq`/`blip_mode` axis.
+    - **No `v`/visible-gene masking (and so no `zero_init` axis either).**
+      All 16 genes are always visible; instead, "model size" is
+      controlled by zeroing out a random subset of the GRN's 256 possible
+      regulatory edges (`--density`; see "Edge sparsity" below) -- kept
+      fixed for the whole replicate.
+
+    Also introduces an `--n-classes` axis (3 vs. 5 canonical training
+    phenotypes; see "Training set" below), crossed with an
+    L1-regularization on/off axis via `--l1-scale`/`--l2-scale`, and an
+    optional `--doubled-class` axis that presents one training pattern
+    twice as often as the others (uniform by default).
+
+    Self-contained: every model definition (Kouvaris et al. 2017 GRN
+    core, target patterns, elastic-net SSWM) is inlined below rather than
+    imported from the surrounding project, so this file has no dependency
+    on any other file in this repository -- only installable packages
     (marimo, numpy, pandas, scipy, numba, keyname, watermark).
 
-    Uses the unified 20-gene model (16 standard visible genes + 4 extra
-    hidden genes) -- v1..v16 unmask the standard genes in a fixed
-    interleaved order, v17..v20 progressively unmask the 4 extra genes.
-
-    CLI-parameterizable, no interactive widgets: every value below reads its
-    default from `mo.cli_args()`, so running `marimo run dd_single_trial.py
-    -- --seed 21 --v 12 --zero-init true --l1-scale 0.9 --l2-scale 0.1
-    --blip-freq 0.5 --num-epoch 50000` sets all of them, and the trial runs
-    immediately (no button to click).
+    CLI-parameterizable, no interactive widgets: every value below reads
+    its default from `mo.cli_args()`, so running `marimo run
+    2026-07-30-exploratory-edge-sparsity.py -- --seed 11 --density 0.5
+    --n-classes 5 --l1-scale 0.0 --l2-scale 1.0 --num-epoch 50000` sets
+    all of them, and the trial runs immediately (no button to click).
     """
     )
     return
@@ -99,68 +114,49 @@ def configure_trial(mo):
         v = _args.get(name)
         return cast(v) if v is not None else default
 
-    seed = _get("seed", 20, int)
-    v_label = _get("v", 16, int)
-    zero_init = _get(
-        "zero-init", False, lambda s: str(s).lower() in ("1", "true", "yes")
-    )
+    seed = _get("seed", 1, int)
+    density = _get("density", 1.0, float)
     l1_scale = _get("l1-scale", 0.995, float)
     l2_scale = _get("l2-scale", 0.005, float)
-    blip_freq = _get("blip-freq", 0.66, float)
+    n_classes = _get("n-classes", 3, int)
     num_epoch = _get("num-epoch", 100, int)
-    # schedule_mode controls how ties are broken in the environment-order
-    # schedule (see weighted_interleave_fn below): "none" (deterministic,
-    # default), "local" (randomize among equally-due environments), or
-    # "global" (fully randomize the whole schedule's order).
-    schedule_mode = _get("schedule-mode", "none", lambda s: str(s).lower())
-    # blip_mode controls how the 3 blip target phenotypes (presented
-    # during blip periods instead of the true S1/S2/S3 patterns; see
-    # build_schedule below) are constructed: "fixed" (default -- the
-    # original, deterministic single-bit flip at a fixed position per
-    # pattern), "bitflip" (single-bit flip at a position drawn uniformly
-    # at random, fixed for the whole replicate), or "random" (an entirely
-    # random +-1 phenotype, fixed for the whole replicate). "bitflip" and
-    # "random" both re-draw if the result would coincide with an actual
-    # training pattern (or its sign-negation -- see build_schedule).
-    blip_mode = _get("blip-mode", "fixed", lambda s: str(s).lower())
+    # -1 (default) = uniform presentation; else the 0-indexed position
+    # within the training set (train_idx/training_set) that gets DOUBLE
+    # the presentation weight of the other n_classes-1 patterns -- see
+    # "Training schedule" below.
+    doubled_class = _get("doubled-class", -1, int)
     return (
-        blip_freq,
-        blip_mode,
+        density,
+        doubled_class,
         l1_scale,
         l2_scale,
+        n_classes,
         num_epoch,
-        schedule_mode,
         seed,
-        v_label,
-        zero_init,
     )
 
 
 @app.cell
 def show_config(
-    blip_freq,
-    blip_mode,
+    density,
+    doubled_class,
     l1_scale,
     l2_scale,
+    n_classes,
     num_epoch,
     pd,
-    schedule_mode,
     seed,
-    v_label,
-    zero_init,
 ):
     config_df = pd.DataFrame(
         [
             {
-                "v": v_label,
                 "seed": seed,
-                "zero_init": zero_init,
+                "density": density,
+                "n_classes": n_classes,
+                "doubled_class": doubled_class,
                 "l1_scale": l1_scale,
                 "l2_scale": l2_scale,
-                "blip_freq": blip_freq,
-                "blip_mode": blip_mode,
                 "num_epoch": num_epoch,
-                "schedule_mode": schedule_mode,
             }
         ]
     )
@@ -173,6 +169,10 @@ def delimit_grn_core(mo):
     mo.md(
         """
     ## Core GRN model (Kouvaris et al. 2017), inlined from grn.py
+
+    Uses the plain 16-gene model (no hidden-gene extension, no
+    visible-gene masking -- all 16 genes are always visible; see "Edge
+    sparsity" below for how model size is instead controlled).
     """
     )
     return
@@ -223,27 +223,7 @@ def grn_core(njit, np):
                 total += B[i, j] * B[i, j]
         return total / n2
 
-    @njit
-    def mutate(G, B):
-        n = G.shape[0]
-        Gp = G.copy()
-        i = np.random.randint(0, n)
-        mu1 = np.random.uniform(-0.1, 0.1)
-        gi = Gp[i] + mu1
-        if gi < -1.0:
-            gi = -1.0
-        elif gi > 1.0:
-            gi = 1.0
-        Gp[i] = gi
-
-        if np.random.random() < (1.0 / 15.0):
-            bound = 1.0 / (150.0 * n * n)
-            Bp = B + np.random.uniform(-bound, bound, size=(n, n))
-        else:
-            Bp = B.copy()
-        return Gp, Bp
-
-    return N, benefit, develop, l1_cost, l2_cost, mutate
+    return ALPHA, N, T, TAU1, TAU2, benefit, develop, l1_cost, l2_cost
 
 
 @app.cell(hide_code=True)
@@ -251,6 +231,11 @@ def delimit_targets(mo):
     mo.md(
         """
     ## Target phenotypes, inlined from targets.py
+
+    `CLASS_8` is the same 8 canonical phenotypes used throughout this
+    project's `v`-sweep notebooks -- indexed by `(m1, m2, m3)` in
+    `{A,B}^3` (lexicographic order, `itertools.product("AB", repeat=3)`),
+    with `m4` fixed to `A`.
     """
     )
     return
@@ -274,12 +259,17 @@ def targets_definitions(N, np):
         ]
         return np.concatenate(mods)
 
-    S1 = _pattern(["A", "A", "A", "A"])
-    S2 = _pattern(["A", "B", "B", "A"])
-    S3 = _pattern(["B", "B", "A", "A"])
-    TRAINING_SET = np.stack([S1, S2, S3])
+    CLASS_8 = np.stack(
+        [
+            _pattern([m1, m2, m3, "A"])
+            for m1, m2, m3 in itertools.product("AB", repeat=3)
+        ]
+    )
+    assert CLASS_8.shape == (8, N)
 
-    # sanity: verify against literal transcription of S1 Appendix Eq. 2
+    # sanity: idx 0/3/6 are this project's original 3-class training set
+    # S1/S2/S3 (literal transcription of Kouvaris et al. 2017 Appendix
+    # Eq. 2).
     _S1_lit = np.array(
         [-1, 1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, -1, -1, -1, -1],
         dtype=np.float64,
@@ -292,49 +282,11 @@ def targets_definitions(N, np):
         [1, -1, 1, -1, 1, 1, -1, -1, -1, 1, 1, -1, -1, -1, -1, -1],
         dtype=np.float64,
     )
-    assert np.array_equal(S1, _S1_lit)
-    assert np.array_equal(S2, _S2_lit)
-    assert np.array_equal(S3, _S3_lit)
+    assert np.array_equal(CLASS_8[0], _S1_lit)
+    assert np.array_equal(CLASS_8[3], _S2_lit)
+    assert np.array_equal(CLASS_8[6], _S3_lit)
 
-    CLASS_8 = np.stack(
-        [
-            _pattern([m1, m2, m3, "A"])
-            for m1, m2, m3 in itertools.product("AB", repeat=3)
-        ]
-    )
-    assert CLASS_8.shape == (8, N)
-    for _s in TRAINING_SET:
-        assert any(np.array_equal(_s, _c) for _c in CLASS_8)
-
-    # all possible single-bit transformations of each training set item --
-    # the full population that the "bitflip" blip_mode's per-replicate
-    # draw (see build_schedule below) samples one candidate from.
-    _bitflip_rows = []
-    for _s in TRAINING_SET:
-        for _bit in range(N):
-            _variant = _s.copy()
-            _variant[_bit] *= -1
-            _bitflip_rows.append(_variant)
-    BITFLIP_CLASS_48 = np.stack(_bitflip_rows)
-    assert BITFLIP_CLASS_48.shape == (3 * N, N)
-
-    # verify all 48 variants are pairwise distinct under +/- equivalence
-    # (fold_to_canonical treats a pattern and its negation as the same
-    # class everywhere else in this notebook) and that none coincides
-    # with a CLASS_8 member under that same equivalence -- both provable
-    # from the min pairwise Hamming distance between TRAINING_SET members
-    # (>=8, vs. a single bit flip's distance of 1) but checked here
-    # exhaustively as a cheap runtime guard.
-    def _folds_equal(a, b):
-        return np.array_equal(a, b) or np.array_equal(a, -b)
-
-    for _i in range(BITFLIP_CLASS_48.shape[0]):
-        for _j in range(_i + 1, BITFLIP_CLASS_48.shape[0]):
-            assert not _folds_equal(BITFLIP_CLASS_48[_i], BITFLIP_CLASS_48[_j])
-        for _c in CLASS_8:
-            assert not _folds_equal(BITFLIP_CLASS_48[_i], _c)
-
-    return BITFLIP_CLASS_48, CLASS_8, MOD_A, TRAINING_SET
+    return CLASS_8, MOD_A
 
 
 @app.cell(hide_code=True)
@@ -356,129 +308,136 @@ def generalisation_core(MOD_A, np):
         mod4_match = np.all(signs[:, 12:16] == _CANONICAL_MOD4, axis=1)
         return np.where(mod4_match[:, None], Pa_batch, -Pa_batch)
 
-    def classify_exact_counts(Pa_batch, candidates):
-        # +/- match rather than exact-sign match: fold_to_canonical only
-        # examines the last 4-bit block to pick a fold direction, so it
-        # mis-folds any candidate whose own last block isn't uniformly
-        # +/-MOD_A[3] (e.g. a single-bit-flip candidate whose flipped bit
-        # falls inside that block) -- checking both orientations here
-        # sidesteps that rather than relying on the input already being
-        # correctly folded. abs(dot) is invariant to Pa_batch's own global
-        # sign, so this is equally correct whether Pa_batch is pre-folded
-        # or raw, and is a no-op change for candidates (like CLASS_8) that
-        # fold_to_canonical does handle correctly.
-        signs = np.sign(Pa_batch)
-        dots = signs @ candidates.T
-        n = candidates.shape[1]
-        return (np.abs(dots) == n).sum(axis=0)
-
-    def chi_squared(counts, M):
+    def chi_squared(counts, M, expected=None):
+        # expected defaults to uniform (1/k each) -- pass an array
+        # aligned with counts (summing to 1) for a non-uniform reference
+        # distribution, e.g. pure_train_chi2 under --doubled-class (see
+        # "Training schedule" below), where the "correct" distribution
+        # isn't uniform across the training classes.
         k = counts.shape[0]
         freq = counts / M
-        expected = 1.0 / k
+        if expected is None:
+            expected = 1.0 / k
         return float(np.sum((freq - expected) ** 2 / expected))
 
-    return chi_squared, classify_exact_counts, fold_to_canonical
+    return chi_squared, fold_to_canonical
 
 
 @app.cell(hide_code=True)
-def delimit_masked_model(mo):
+def delimit_training_set(mo):
     mo.md(
         """
-    ## Masked development + zero-init generalization, inlined from grn_output_masked.py
+    ## Training set: 3-class vs. 5-class
+
+    `--n-classes` selects which subset of the 8 canonical `CLASS_8`
+    phenotypes is used as the training set (cycled round-robin across
+    blocks -- see "Training schedule" below):
+
+    | idx | label  | m1 m2 m3 | m1==m2 | canonical | in 3-class | in 5-class |
+    |----:|--------|----------|:------:|:---------:|:----------:|:----------:|
+    |   0 | class1 | A A A    |   yes  |    S1     |    yes     |    yes     |
+    |   1 | class2 | A A B    |   yes  |    --     |    no      |    yes     |
+    |   3 | class4 | A B B    |   no   |    S2     |    yes     |    yes     |
+    |   6 | class7 | B B A    |   yes  |    S3     |    yes     |    yes     |
+    |   7 | class8 | B B B    |   yes  |    --     |    no      |    yes     |
+
+    3-class (`--n-classes 3`) is this project's original training set,
+    `{S1, S2, S3}` = `CLASS_8[[0, 3, 6]]`. 5-class (`--n-classes 5`) adds
+    `class2` and `class8`, `CLASS_8[[0, 1, 3, 6, 7]]` -- the two
+    additional `m1==m2` phenotypes bracketing `S1`/`S3` in `CLASS_8`'s
+    index order (`S2`/`class4` is the sole `m1!=m2` member of both
+    training sets).
+
+    `train_idx` (0-indexed, in the order listed above -- e.g. for
+    `n_classes=3` position 0/1/2 is S1/S2/S3 respectively) is also how
+    `--doubled-class` (see "Training schedule" below) selects which
+    single pattern gets presented twice as often as the others.
     """
     )
     return
 
 
 @app.cell
-def masked_model_core(
-    BITFLIP_CLASS_48,
-    CLASS_8,
-    N,
-    chi_squared,
-    develop,
-    fold_to_canonical,
-    njit,
-    np,
-    qmc,
+def build_training_set(CLASS_8, n_classes, np):
+    TRAIN_IDX_3 = [0, 3, 6]
+    TRAIN_IDX_5 = [0, 1, 3, 6, 7]
+    assert n_classes in (3, 5), "n_classes must be 3 or 5"
+    train_idx = TRAIN_IDX_3 if n_classes == 3 else TRAIN_IDX_5
+    training_set = CLASS_8[np.asarray(train_idx)]
+    train_class_idx_str = ",".join(str(_i) for _i in train_idx)
+    return train_class_idx_str, train_idx, training_set
+
+
+@app.cell
+def show_training_set(n_classes, pd, train_class_idx_str, training_set):
+    training_set_df = pd.DataFrame(
+        {
+            "n_classes": n_classes,
+            "train_class_idx": train_class_idx_str,
+            "n_training_patterns": training_set.shape[0],
+        },
+        index=[0],
+    )
+    training_set_df
+    return
+
+
+@app.cell(hide_code=True)
+def delimit_phenotype_measurement(mo):
+    mo.md(
+        """
+    ## Phenotype sampling + classification, inlined from grn_output_masked.py
+
+    Unlike the `v`-sweep notebooks' `classify_by_phenotype_output_masked`,
+    there's no "bitflip" bucket here (that existed only to track blip
+    targets, which this notebook doesn't use) -- phenotypes are
+    classified as one of the 8 canonical `CLASS_8` classes, or "other".
+    """
+    )
+    return
+
+
+@app.cell
+def phenotype_measurement(
+    CLASS_8, N, chi_squared, develop, fold_to_canonical, np, qmc
 ):
-    def make_visible_mask(v, n, perm):
-        mask = np.zeros(n, dtype=np.bool_)
-        mask[perm[:v]] = True
-        return mask
-
-    @njit(fastmath=True)
-    def develop_output_masked(G, B, visible_mask):
-        n = G.shape[0]
-        B_eff = B.copy()
-        for i in range(n):
-            if not visible_mask[i]:
-                for j in range(n):
-                    B_eff[j, i] = 0.0
-        return develop(G, B_eff)
-
-    @njit(fastmath=True)
-    def develop_output_masked_zero_masked(G, B, visible_mask):
-        n = G.shape[0]
-        G_eff = G.copy()
-        for i in range(n):
-            if not visible_mask[i]:
-                G_eff[i] = 0.0
-        return develop_output_masked(G_eff, B, visible_mask)
-
     def sample_G(M, seed, n):
         m = max(1, (M - 1).bit_length())
         sampler = qmc.Sobol(d=n, scramble=True, seed=seed)
         unit_cube = sampler.random_base2(m)[:M]
         return 2.0 * unit_cube - 1.0
 
-    def develop_batch_output_masked(G_batch, B, visible_mask):
+    def develop_batch(G_batch, B):
         Pa = np.empty_like(G_batch)
         for k in range(G_batch.shape[0]):
-            Pa[k] = develop_output_masked(G_batch[k], B, visible_mask)
+            Pa[k] = develop(G_batch[k], B)
         return Pa
 
-    def classify_by_phenotype_output_masked(Pa_batch):
+    def classify_by_phenotype(Pa_batch):
         Pa_folded = fold_to_canonical(Pa_batch)
         k = CLASS_8.shape[0]
         M = Pa_batch.shape[0]
         signs = np.sign(Pa_folded)
         dots = signs @ CLASS_8.T
         match = dots == N
-        train_cols = [0, 3, 6]
-        other_cols = [1, 2, 4, 5, 7]
-        # +/- match against the 48 single-bit-transformation variants of
-        # the training set (see classify_exact_counts for why abs() is
-        # needed rather than a single-orientation exact match) -- carved
-        # out of "other" into its own bucket (index k, just below "other"
-        # at k+1) rather than left as unlabeled noise, since a genotype
-        # landing exactly on one of these 48 patterns is a specifically
-        # interesting outcome (a near-training generalization) distinct
-        # from arbitrary "other" phenotypes.
-        bitflip_match = np.any(np.abs(signs @ BITFLIP_CLASS_48.T) == N, axis=1)
         assigned = np.full(M, -1, dtype=np.int64)
         still_open = np.ones(M, dtype=bool)
-        for col in train_cols + other_cols:
+        for col in range(k):
             take = still_open & match[:, col]
             assigned[take] = col
             still_open &= ~take
-        take_bitflip = still_open & bitflip_match
-        assigned[take_bitflip] = k
-        still_open &= ~take_bitflip
-        assigned[still_open] = k + 1
-        counts = np.zeros(k + 2, dtype=np.int64)
-        for col in range(k + 2):
+        assigned[still_open] = k
+        counts = np.zeros(k + 1, dtype=np.int64)
+        for col in range(k + 1):
             counts[col] = int((assigned == col).sum())
 
         # chi-squared evenness of the phenotype distribution *within* the
         # "other" bucket (still_open: samples matching none of the 8
-        # canonical classes or any of the 48 bitflip variants) -- bit-pack
-        # each such sample's sign pattern into an integer id, tally
-        # occurrences of each distinct pattern actually observed, and
-        # score how evenly those occurrences are spread (0 = perfectly
-        # even across whatever distinct patterns were observed). NaN when
-        # "other" is empty -- nothing to measure.
+        # canonical classes) -- bit-pack each such sample's sign pattern
+        # into an integer id, tally occurrences of each distinct pattern
+        # actually observed, and score how evenly those occurrences are
+        # spread (0 = perfectly even across whatever distinct patterns
+        # were observed). NaN when "other" is empty -- nothing to measure.
         other_signs = signs[still_open]
         if other_signs.shape[0] > 0:
             bits = (other_signs > 0).astype(np.int64)
@@ -494,31 +453,88 @@ def masked_model_core(
 
         return counts, other_chi2, n_other_classes
 
-    return (
-        classify_by_phenotype_output_masked,
-        develop_batch_output_masked,
-        develop_output_masked,
-        develop_output_masked_zero_masked,
-        make_visible_mask,
-        sample_G,
+    return classify_by_phenotype, develop_batch, sample_G
+
+
+@app.cell(hide_code=True)
+def delimit_edge_mask(mo):
+    mo.md(
+        """
+    ## Edge sparsity ("model size") sweep
+
+    Replaces the earlier `v` (visible-gene count) double-descent axis:
+    model size here is controlled by how many of the GRN's `N*N = 256`
+    possible regulatory edges (`B` matrix entries, `N=16`) are
+    permanently zeroed out, rather than by masking whole genes.
+    `--density` in `[0, 1]` sets the target *fraction of edges retained*;
+    `n_zero_edges = round((1 - density) * 256)` of the 256 possible edges
+    are zeroed. Which specific edges are zeroed is drawn uniformly at
+    random, seeded by `--seed` (so it varies per replicate) via a fixed
+    random permutation of the 256 edge positions, of which the first
+    `n_zero_edges` are zeroed -- for a fixed seed this also means the
+    zeroed set only grows (is nested) as density decreases, though
+    nothing downstream relies on that property.
+
+    The same `edge_mask` is used for the entire replicate:
+    `mutate_edge_masked` (below) re-applies it to `B` after every
+    mutation step, so a zeroed edge's weight is pinned at exactly 0 for
+    the whole run (rather than just masked at evaluation time) -- which
+    also means zeroed edges pay no L1/L2 regularization cost, since
+    `l1_cost`/`l2_cost` are computed directly on `B`.
+    """
     )
+    return
 
 
 @app.cell
-def masked_model_ext_elastic(
-    BITFLIP_CLASS_48,
-    BLIP_SET,
+def build_edge_mask(N, density, np, seed):
+    n_zero_edges = int(round((1.0 - density) * N * N))
+    n_zero_edges = min(max(n_zero_edges, 0), N * N)
+    _rng = np.random.default_rng(seed)
+    _edge_perm = _rng.permutation(N * N)
+    _zeroed_flat = _edge_perm[:n_zero_edges]
+    edge_mask = np.ones((N, N), dtype=np.float64)
+    edge_mask.reshape(-1)[_zeroed_flat] = 0.0
+    return edge_mask, n_zero_edges
+
+
+@app.cell
+def show_edge_mask(N, edge_mask, n_zero_edges, pd):
+    edge_mask_df = pd.DataFrame(
+        [
+            {
+                "n_edges_total": N * N,
+                "n_zero_edges": n_zero_edges,
+                "n_kept_edges": int(edge_mask.sum()),
+                "density_actual": float(edge_mask.mean()),
+            }
+        ]
+    )
+    edge_mask_df
+    return
+
+
+@app.cell(hide_code=True)
+def delimit_edge_masked_model(mo):
+    mo.md(
+        """
+    ## Elastic-net SSWM evolution over edge-masked B, inlined from grn_output_masked.py
+    """
+    )
+    return
+
+
+@app.cell
+def edge_masked_model(
+    N,
     benefit,
     builtins,
     chi_squared,
-    classify_by_phenotype_output_masked,
-    classify_exact_counts,
-    develop_batch_output_masked,
-    develop_output_masked,
-    fold_to_canonical,
+    classify_by_phenotype,
+    develop,
+    develop_batch,
     l1_cost,
     l2_cost,
-    mutate,
     njit,
     np,
     sample_G,
@@ -530,13 +546,36 @@ def masked_model_ext_elastic(
     _print = builtins.print
 
     @njit(fastmath=True)
-    def fitness_output_masked_ext_elastic(
-        G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
-    ):
-        Pa = develop_output_masked(G, B, visible_mask)
-        b = benefit(Pa[:n_score], S)
+    def fitness_edge_masked_elastic(G, B, S, lam1, lam2, w1, w2):
+        Pa = develop(G, B)
+        b = benefit(Pa, S)
         c = w1 * lam1 * l1_cost(B) + w2 * lam2 * l2_cost(B)
         return b - c
+
+    @njit
+    def mutate_edge_masked(G, B, edge_mask):
+        n = G.shape[0]
+        Gp = G.copy()
+        i = np.random.randint(0, n)
+        mu1 = np.random.uniform(-0.1, 0.1)
+        gi = Gp[i] + mu1
+        if gi < -1.0:
+            gi = -1.0
+        elif gi > 1.0:
+            gi = 1.0
+        Gp[i] = gi
+
+        if np.random.random() < (1.0 / 15.0):
+            bound = 1.0 / (150.0 * n * n)
+            Bp = B + np.random.uniform(-bound, bound, size=(n, n))
+            # pin zeroed edges (edge_mask entries == 0) at exactly 0 on
+            # every mutation step, not just at evaluation time -- so a
+            # zeroed edge's weight never drifts and never accrues L1/L2
+            # cost.
+            Bp = Bp * edge_mask
+        else:
+            Bp = B.copy()
+        return Gp, Bp
 
     # nogil=True releases the GIL for the duration of this call (pure
     # nopython numeric code, no Python objects touched), so a plain Python
@@ -553,7 +592,7 @@ def masked_model_ext_elastic(
     # GIL for the duration of the call (see numba.cpython.printimpl), so
     # it's safe to call here despite nogil=True.
     @njit(nogil=True)
-    def run_sswm_output_masked_scheduled_traced_ext_elastic(
+    def run_sswm_edge_masked_scheduled_traced_elastic(
         G0,
         B0,
         training_set,
@@ -563,11 +602,10 @@ def masked_model_ext_elastic(
         lam2,
         w1,
         w2,
-        visible_mask,
+        edge_mask,
         seed,
         snapshot_blocks,
         timeseries_blocks,
-        n_score,
         G_snap,
         B_snap,
         B_trace,
@@ -617,13 +655,9 @@ def masked_model_ext_elastic(
             t_idx = schedule[block]
             S = training_set[t_idx]
 
-            f = fitness_output_masked_ext_elastic(
-                G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
-            )
-            Gp, Bp = mutate(G, B)
-            fp = fitness_output_masked_ext_elastic(
-                Gp, Bp, S, lam1, lam2, w1, w2, visible_mask, n_score
-            )
+            f = fitness_edge_masked_elastic(G, B, S, lam1, lam2, w1, w2)
+            Gp, Bp = mutate_edge_masked(G, B, edge_mask)
+            fp = fitness_edge_masked_elastic(Gp, Bp, S, lam1, lam2, w1, w2)
             if fp > f:
                 G = Gp
                 B = Bp
@@ -663,250 +697,31 @@ def masked_model_ext_elastic(
 
         return G, B
 
-    def compute_errors_output_masked_ext(
-        B, visible_mask, seed, n_score, M=100_000
-    ):
-        n_total = B.shape[0]
-        G_batch = sample_G(M, seed, n=n_total)
-        Pa_batch = develop_batch_output_masked(G_batch, B, visible_mask)
-        Pa_scored = Pa_batch[:, :n_score]
-        Pa_folded = fold_to_canonical(Pa_scored)
-        # class_counts is length 10: CLASS_8 classes 1..8 (indices 0..7,
-        # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3), the
-        # "bitflip" bucket (index 8, matches any of the 48 single-bit
-        # transformations of a training set item), and "other" (index 9,
-        # matches none of the above).
+    def compute_errors_edge_masked(B, seed, M, train_idx, train_class_probs):
+        G_batch = sample_G(M, seed, n=N)
+        Pa_batch = develop_batch(G_batch, B)
         (
             class_counts,
             other_chi2,
             n_other_classes,
-        ) = classify_by_phenotype_output_masked(Pa_scored)
-        train_counts = class_counts[[0, 3, 6]]
-        blip_counts = classify_exact_counts(Pa_folded, BLIP_SET)
-        # per-pattern breakdown across all 48 bitflip variants, for a chi2
-        # stat weighted by their expected sampling frequency: make_blips
-        # draws each replicate's presented variant uniformly at random
-        # from among the 16 single-bit positions for its training item, so
-        # (since all 3 items are otherwise presented equally often) the
-        # correct expected frequency across the 48 variants is uniform --
-        # exactly what chi_squared's default 1/k-per-class already assumes.
-        bitflip_counts_48 = classify_exact_counts(Pa_folded, BITFLIP_CLASS_48)
+        ) = classify_by_phenotype(Pa_batch)
+        train_counts = class_counts[train_idx]
         return (
-            chi_squared(train_counts, M),
+            # scored against the ACTUAL presentation weights (uniform
+            # unless --doubled-class is set), not always uniform -- see
+            # build_round_robin_schedule's train_class_probs.
+            chi_squared(train_counts, M, expected=train_class_probs),
             chi_squared(class_counts[:8], M),
-            chi_squared(blip_counts, M),
-            chi_squared(bitflip_counts_48, M),
             class_counts,
-            blip_counts,
             other_chi2,
             n_other_classes,
         )
 
     return (
-        compute_errors_output_masked_ext,
-        run_sswm_output_masked_scheduled_traced_ext_elastic,
-    )
-
-
-@app.cell
-def masked_model_zero_masked_elastic(
-    BITFLIP_CLASS_48,
-    BLIP_SET,
-    benefit,
-    builtins,
-    chi_squared,
-    classify_by_phenotype_output_masked,
-    classify_exact_counts,
-    develop_batch_output_masked,
-    develop_output_masked_zero_masked,
-    fold_to_canonical,
-    l1_cost,
-    l2_cost,
-    mutate,
-    njit,
-    np,
-    sample_G,
-):
-    # marimo shadows the builtin `print` within each cell with its own
-    # output-capturing wrapper, which numba's nopython mode can't type --
-    # capture the real builtins.print here so the njit progress heartbeat
-    # below can reference a supported callable via closure.
-    _print = builtins.print
-
-    @njit(fastmath=True)
-    def fitness_output_masked_zero_masked_elastic(
-        G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
-    ):
-        Pa = develop_output_masked_zero_masked(G, B, visible_mask)
-        b = benefit(Pa[:n_score], S)
-        c = w1 * lam1 * l1_cost(B) + w2 * lam2 * l2_cost(B)
-        return b - c
-
-    # nogil=True releases the GIL for the duration of this call (pure
-    # nopython numeric code, no Python objects touched), so a plain Python
-    # watcher thread in the caller can concurrently poll progress_counts
-    # and drain newly-written G_snap/B_snap/B_trace rows to disk as they
-    # appear -- this is what makes output progressively durable against a
-    # SLURM job timeout, without restructuring this loop into resumable
-    # chunks. G_snap/B_snap/B_trace are caller-allocated and filled
-    # in-place; progress_counts (shape (2,), int64) publishes how many
-    # snapshot/timeseries rows are safe to read -- the count is only
-    # bumped *after* the corresponding row is fully written, so a watcher
-    # thread that only reads indices below the last-seen count never
-    # observes a partial row. numba's print() internally reacquires the
-    # GIL for the duration of the call (see numba.cpython.printimpl), so
-    # it's safe to call here despite nogil=True.
-    @njit(nogil=True)
-    def run_sswm_output_masked_scheduled_traced_zero_masked_elastic(
-        G0,
-        B0,
-        training_set,
-        K,
-        schedule,
-        lam1,
-        lam2,
-        w1,
-        w2,
-        visible_mask,
-        seed,
-        snapshot_blocks,
-        timeseries_blocks,
-        n_score,
-        G_snap,
-        B_snap,
-        B_trace,
-        progress_counts,
-    ):
-        np.random.seed(seed)
-        G = G0.copy()
-        B = B0.copy()
-        n_blocks = schedule.shape[0]
-        total_gens = n_blocks * K
-
-        # snapshot_blocks/timeseries_blocks are sorted-ascending, unique
-        # block indices in [0, n_blocks] -- independent point sets, walked
-        # via monotonic pointers rather than a fixed stride, so recording
-        # cadence can be arbitrarily (non-uniformly) spaced.
-        n_snap_pts = snapshot_blocks.shape[0]
-        n_ts_pts = timeseries_blocks.shape[0]
-        snap_idx = 0
-        ts_idx = 0
-        snap_ptr = 0
-        ts_ptr = 0
-
-        # Additional heartbeat directly from inside the loop, independent
-        # of the caller's watcher thread -- numba's nopython mode doesn't
-        # support time.time() (only plain print() with comma-separated
-        # args), so approximate a ~20s cadence using the benchmarked
-        # single-threaded throughput of this loop (~83,000 gens/sec on
-        # non-cluster hardware) converted to a generation-count interval.
-        # Actual cadence scales with real hardware speed -- this is a
-        # "job is still alive" signal, not a precise timer.
-        LOG_EVERY_GENS = 1_660_000
-
-        if snap_ptr < n_snap_pts and snapshot_blocks[snap_ptr] == 0:
-            G_snap[snap_idx] = G
-            B_snap[snap_idx] = B
-            snap_idx += 1
-            snap_ptr += 1
-            progress_counts[0] = snap_idx
-        if ts_ptr < n_ts_pts and timeseries_blocks[ts_ptr] == 0:
-            B_trace[ts_idx] = B
-            ts_idx += 1
-            ts_ptr += 1
-            progress_counts[1] = ts_idx
-
-        for gen in range(total_gens):
-            block = gen // K
-            t_idx = schedule[block]
-            S = training_set[t_idx]
-
-            f = fitness_output_masked_zero_masked_elastic(
-                G, B, S, lam1, lam2, w1, w2, visible_mask, n_score
-            )
-            Gp, Bp = mutate(G, B)
-            fp = fitness_output_masked_zero_masked_elastic(
-                Gp, Bp, S, lam1, lam2, w1, w2, visible_mask, n_score
-            )
-            if fp > f:
-                G = Gp
-                B = Bp
-
-            if (gen + 1) % LOG_EVERY_GENS == 0:
-                _print(
-                    "njit-heartbeat",
-                    "seed",
-                    seed,
-                    "gen",
-                    gen + 1,
-                    "/",
-                    total_gens,
-                    "pct",
-                    (gen + 1) * 100 // total_gens,
-                )
-
-            if (gen + 1) % K == 0:
-                completed_block = (gen + 1) // K
-                if (
-                    snap_ptr < n_snap_pts
-                    and completed_block == snapshot_blocks[snap_ptr]
-                ):
-                    G_snap[snap_idx] = G
-                    B_snap[snap_idx] = B
-                    snap_idx += 1
-                    snap_ptr += 1
-                    progress_counts[0] = snap_idx
-                if (
-                    ts_ptr < n_ts_pts
-                    and completed_block == timeseries_blocks[ts_ptr]
-                ):
-                    B_trace[ts_idx] = B
-                    ts_idx += 1
-                    ts_ptr += 1
-                    progress_counts[1] = ts_idx
-
-        return G, B
-
-    def compute_errors_output_masked_zero_masked(
-        B, visible_mask, seed, n_score, M=100_000
-    ):
-        n_total = B.shape[0]
-        G_batch = sample_G(M, seed, n=n_total)
-        G_batch = G_batch.copy()
-        G_batch[:, ~visible_mask] = 0.0
-        Pa_batch = develop_batch_output_masked(G_batch, B, visible_mask)
-        Pa_scored = Pa_batch[:, :n_score]
-        Pa_folded = fold_to_canonical(Pa_scored)
-        # class_counts is length 10: CLASS_8 classes 1..8 (indices 0..7,
-        # order-preserving -- train_cols [0, 3, 6] are S1/S2/S3), the
-        # "bitflip" bucket (index 8, matches any of the 48 single-bit
-        # transformations of a training set item), and "other" (index 9,
-        # matches none of the above).
-        (
-            class_counts,
-            other_chi2,
-            n_other_classes,
-        ) = classify_by_phenotype_output_masked(Pa_scored)
-        train_counts = class_counts[[0, 3, 6]]
-        blip_counts = classify_exact_counts(Pa_folded, BLIP_SET)
-        # see compute_errors_output_masked_ext for why uniform (the
-        # chi_squared default) is the correct expected-frequency weighting
-        # across the 48 bitflip variants.
-        bitflip_counts_48 = classify_exact_counts(Pa_folded, BITFLIP_CLASS_48)
-        return (
-            chi_squared(train_counts, M),
-            chi_squared(class_counts[:8], M),
-            chi_squared(blip_counts, M),
-            chi_squared(bitflip_counts_48, M),
-            class_counts,
-            blip_counts,
-            other_chi2,
-            n_other_classes,
-        )
-
-    return (
-        compute_errors_output_masked_zero_masked,
-        run_sswm_output_masked_scheduled_traced_zero_masked_elastic,
+        compute_errors_edge_masked,
+        fitness_edge_masked_elastic,
+        mutate_edge_masked,
+        run_sswm_edge_masked_scheduled_traced_elastic,
     )
 
 
@@ -914,177 +729,104 @@ def masked_model_zero_masked_elastic(
 def delimit_model_constants(mo):
     mo.md(
         """
-    ## Model constants and blip schedule
+    ## Model constants
     """
     )
     return
 
 
 @app.cell
-def weighted_interleave_fn(np):
-    def weighted_interleave(counts, schedule_mode="none", rng=None):
-        # Greedy fair-queueing schedule: at each step, whichever
-        # environment is furthest behind its target proportion
-        # (counts[i] / total) goes next. schedule_mode controls how ties
-        # for "furthest behind" are broken -- ties are common here since
-        # e.g. all 3 true patterns share one count and all 3 blip patterns
-        # share another, so at any given step several environments are
-        # often equally due:
-        #   "none"   -- deterministic: always break toward the lowest
-        #               environment index (original behavior).
-        #   "local"  -- draw uniformly at random (via rng) among *all*
-        #               environments currently tied for furthest-behind,
-        #               instead of always the lowest index. This
-        #               randomizes presentation order within each natural
-        #               batch of equally-due environments while leaving
-        #               the overall per-environment counts/frequencies
-        #               exactly as requested.
-        #   "global" -- build the "none"-order schedule, then apply one
-        #               full random permutation (via rng) across the
-        #               entire sequence, discarding all local structure.
-        total = sum(counts)
-        seq = np.empty(total, dtype=np.int64)
-        appeared = [0] * len(counts)
-        for step in range(total):
-            deficits = np.asarray(
-                [
-                    (counts[i] / total) * (step + 1) - appeared[i]
-                    for i in range(len(counts))
-                ]
-            )
-            if schedule_mode == "local":
-                eligible = np.flatnonzero(
-                    np.isclose(deficits, deficits.max(), atol=1e-9)
-                )
-                i = int(rng.choice(eligible))
-            else:
-                i = int(np.argmax(deficits))
-            seq[step] = i
-            appeared[i] += 1
-        if schedule_mode == "global":
-            rng.shuffle(seq)
-        return seq
-
-    return (weighted_interleave,)
-
-
-@app.cell
-def model_constants(np, os):
+def model_constants(os):
     LAM1 = 0.22
     LAM2 = 38.0
-    N_SCORE = 16
-    N_TOTAL = 20
     TOTAL_BLOCKS = 3600
-    N_SNAPSHOT_TARGET = 100
-    N_TIMESERIES_TARGET = 1_000
+    # sampling-over-time density, 20-fold lower than the v-sweep notebooks'
+    # 100/1_000 (fewer recorded points per replicate, since this sweep has
+    # far more replicates -- 3960 vs. the low hundreds in prior sweeps --
+    # and per-replicate output size scales directly with these targets).
+    N_SNAPSHOT_TARGET = 5
+    N_TIMESERIES_TARGET = 50
     OUTPUT_DIR = "dd_trial_outputs"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    # standard 16-gene interleaved order, then the 4 extra hidden genes appended --
-    # v<=16 unmasks exactly this prefix, v17..v20 progressively adds the extras.
-    INTERLEAVED_PERM20 = np.array(
-        [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 16, 17, 18, 19],
-        dtype=np.int64,
-    )
     return (
-        INTERLEAVED_PERM20,
         LAM1,
         LAM2,
-        N_SCORE,
         N_SNAPSHOT_TARGET,
         N_TIMESERIES_TARGET,
-        N_TOTAL,
         OUTPUT_DIR,
         TOTAL_BLOCKS,
     )
 
 
-@app.cell
-def build_schedule(
-    TOTAL_BLOCKS,
-    TRAINING_SET,
-    blip_freq,
-    blip_mode,
-    np,
-    schedule_mode,
-    seed,
-    weighted_interleave,
-):
-    def _is_training_member(candidate, training_set):
-        # a pattern's sign-negation is treated as equivalent to it
-        # everywhere else in this notebook (see fold_to_canonical), so a
-        # random blip draw landing on -S1/-S2/-S3 counts as "actually
-        # training on a real class" just as much as +S1/+S2/+S3 does.
-        return any(
-            np.array_equal(candidate, s) or np.array_equal(candidate, -s)
-            for s in training_set
-        )
+@app.cell(hide_code=True)
+def delimit_schedule(mo):
+    mo.md(
+        """
+    ## Training schedule (no blips)
 
-    def make_blips(rng):
-        if blip_mode == "fixed":
-            S1b = TRAINING_SET[0].copy()
-            S1b[0] *= -1
-            S2b = TRAINING_SET[1].copy()
-            S2b[4] *= -1
-            S3b = TRAINING_SET[2].copy()
-            S3b[8] *= -1
-            return S1b, S2b, S3b
+    No blip environments here (contrast the blip-sweep notebooks in this
+    project) -- every block presents one of the `n_classes` actual
+    training patterns. By default (`--doubled-class -1`) each pattern is
+    presented equally often, `TOTAL_BLOCKS / n_classes` blocks apiece
+    (`TOTAL_BLOCKS=3600`, fixed above, is divisible by both supported
+    `n_classes` values, 3 and 5). `--doubled-class` optionally names ONE
+    training-set position (0-indexed into `train_idx`/`training_set` --
+    for `n_classes=3` that's S1/S2/S3 respectively) to present TWICE as
+    often as each of the other `n_classes - 1` patterns -- e.g.
+    `--doubled-class 0` with `n_classes=3` gives presentation weights
+    `[2, 1, 1]`, i.e. block counts `[1800, 900, 900]` out of 3600 total.
+    Either way, blocks are deterministically interleaved (greedy
+    fair-queueing, breaking ties toward the lowest class index -- the
+    same "none" `schedule_mode` behavior this project's earlier
+    blip-sweep notebooks used, inlined here since there's no
+    `schedule_mode` axis otherwise) rather than grouped into contiguous
+    runs, so a doubled class's extra blocks are spread evenly across the
+    whole run instead of front- or back-loaded.
 
-        assert blip_mode in ("bitflip", "random")
-        _n = TRAINING_SET.shape[1]
-        blips = []
-        for _i in range(3):
-            while True:
-                if blip_mode == "bitflip":
-                    _candidate = TRAINING_SET[_i].copy()
-                    _candidate[rng.integers(0, _n)] *= -1
-                else:
-                    _candidate = rng.choice(np.array([-1.0, 1.0]), size=_n)
-                if not _is_training_member(_candidate, TRAINING_SET):
-                    blips.append(_candidate)
-                    break
-        return tuple(blips)
-
-    assert blip_mode in ("fixed", "bitflip", "random")
-    _blip_rng = np.random.default_rng(seed)
-    S1b, S2b, S3b = make_blips(_blip_rng)
-    training_set = np.vstack([TRAINING_SET.astype(np.float64), S1b, S2b, S3b])
-    BLIP_SET = np.stack([S1b, S2b, S3b])
-
-    # blip_freq = blip:true pattern-count ratio (0.66 reproduces this project's
-    # established "blip66" condition: [723,723,723,477,477,477]). 3 equal true
-    # counts + 3 equal blip counts, rounded to integers, remainder folded into
-    # the first true count so the total still hits TOTAL_BLOCKS exactly.
-    _f = blip_freq
-    _true_ct = round(TOTAL_BLOCKS / (3 * (1 + _f)))
-    _blip_ct = round(_true_ct * _f)
-    blip_counts = [_true_ct, _true_ct, _true_ct, _blip_ct, _blip_ct, _blip_ct]
-    blip_counts[0] += TOTAL_BLOCKS - sum(blip_counts)
-    assert sum(blip_counts) == TOTAL_BLOCKS
-
-    assert schedule_mode in ("none", "local", "global")
-    _rng = np.random.default_rng(seed)
-    schedule = weighted_interleave(
-        blip_counts, schedule_mode=schedule_mode, rng=_rng
+    `pure_train_chi2` (see `compute_errors_edge_masked` above) is scored
+    against these SAME presentation weights (`train_class_probs` below,
+    normalized to sum to 1) rather than always assuming uniform -- under
+    `--doubled-class`, a genotype population that reproduces the doubled
+    class twice as often as the other two is the perfect match, not a
+    "biased" one.
+    """
     )
-    assert schedule.shape[0] == TOTAL_BLOCKS
-    return BLIP_SET, S1b, S2b, S3b, blip_counts, schedule, training_set
+    return
 
 
 @app.cell
-def show_blip_counts(blip_counts, pd):
-    blip_counts_df = pd.DataFrame(
-        [
-            {
-                "s1_true": blip_counts[0],
-                "s2_true": blip_counts[1],
-                "s3_true": blip_counts[2],
-                "s1_blip": blip_counts[3],
-                "s2_blip": blip_counts[4],
-                "s3_blip": blip_counts[5],
-            }
-        ]
+def build_round_robin_schedule(TOTAL_BLOCKS, doubled_class, n_classes, np):
+    assert doubled_class in range(-1, n_classes), doubled_class
+    weights = np.ones(n_classes, dtype=np.int64)
+    if doubled_class >= 0:
+        weights[doubled_class] = 2
+    assert TOTAL_BLOCKS % weights.sum() == 0
+    counts = weights * (TOTAL_BLOCKS // weights.sum())
+    assert counts.sum() == TOTAL_BLOCKS
+
+    schedule = np.empty(TOTAL_BLOCKS, dtype=np.int64)
+    appeared = np.zeros(n_classes, dtype=np.int64)
+    for step in range(TOTAL_BLOCKS):
+        deficits = (counts / TOTAL_BLOCKS) * (step + 1) - appeared
+        i = int(np.argmax(deficits))
+        schedule[step] = i
+        appeared[i] += 1
+    assert (appeared == counts).all()
+
+    train_class_probs = counts / TOTAL_BLOCKS
+    return schedule, train_class_probs
+
+
+@app.cell
+def show_schedule(pd, train_class_probs, train_idx):
+    schedule_df = pd.DataFrame(
+        {
+            "train_idx_position": range(len(train_idx)),
+            "class8_idx": train_idx,
+            "train_class_probs": train_class_probs,
+        }
     )
-    blip_counts_df
+    schedule_df
     return
 
 
@@ -1218,70 +960,50 @@ def delimit_run_trial(mo):
 
 @app.cell
 def run_trial(
-    INTERLEAVED_PERM20,
     LAM1,
     LAM2,
-    N_SCORE,
-    N_TOTAL,
+    N,
     OUTPUT_DIR,
     SNAPSHOT_BLOCKS,
     TIMESERIES_BLOCKS,
     append_csv_row,
     append_npz_array,
-    blip_freq,
-    blip_mode,
-    compute_errors_output_masked_ext,
-    compute_errors_output_masked_zero_masked,
+    compute_errors_edge_masked,
     contextlib,
+    density,
+    doubled_class,
+    edge_mask,
     kn,
     l1_cost,
     l1_scale,
     l2_cost,
     l2_scale,
-    make_visible_mask,
+    n_classes,
+    n_zero_edges,
     np,
     num_epoch,
     pd,
-    run_sswm_output_masked_scheduled_traced_ext_elastic,
-    run_sswm_output_masked_scheduled_traced_zero_masked_elastic,
+    run_sswm_edge_masked_scheduled_traced_elastic,
     schedule,
-    schedule_mode,
     seed,
     sys,
     threading,
     time,
+    train_class_idx_str,
+    train_class_probs,
+    train_idx,
     training_set,
     uuid,
-    v_label,
-    zero_init,
 ):
     _t0 = time.time()
     _w1 = l1_scale
     _w2 = l2_scale
     _seed = seed
     _K = num_epoch
-    _v = v_label
     replicate_uid = str(uuid.uuid4())
 
-    _mask = make_visible_mask(_v, n=N_TOTAL, perm=INTERLEAVED_PERM20)
-    _G0 = np.zeros(N_TOTAL)
-    _B0 = np.zeros((N_TOTAL, N_TOTAL))
-
-    if zero_init:
-        _run_sswm = run_sswm_output_masked_scheduled_traced_zero_masked_elastic
-
-        def _errors_fn(B_, seed_, M_):
-            return compute_errors_output_masked_zero_masked(
-                B_, _mask, seed=seed_, n_score=N_SCORE, M=M_
-            )
-
-    else:
-        _run_sswm = run_sswm_output_masked_scheduled_traced_ext_elastic
-
-        def _errors_fn(B_, seed_, M_):
-            return compute_errors_output_masked_ext(
-                B_, _mask, seed=seed_, n_score=N_SCORE, M=M_
-            )
+    _G0 = np.zeros(N)
+    _B0 = np.zeros((N, N))
 
     # M for the (dense, ~thousands of points) per-timepoint trace calls --
     # kept small relative to FINAL_M below since it's paid many times over.
@@ -1295,9 +1017,9 @@ def run_trial(
     # G_snap/B_snap/B_trace are allocated here (rather than inside the
     # njit call) and filled in-place by it, so the watcher thread below
     # can read newly-completed rows out of the same arrays concurrently.
-    _G_snap = np.empty((_n_snap, N_TOTAL))
-    _B_snap = np.empty((_n_snap, N_TOTAL, N_TOTAL))
-    _B_trace = np.empty((_n_ts, N_TOTAL, N_TOTAL))
+    _G_snap = np.empty((_n_snap, N))
+    _B_snap = np.empty((_n_snap, N, N))
+    _B_trace = np.empty((_n_ts, N, N))
     # progress_counts[0]/[1] publish how many snapshot/timeseries rows the
     # njit call has fully written -- see the nogil comment on the njit
     # function itself for the publish-count-last safety argument.
@@ -1316,15 +1038,14 @@ def run_trial(
     # frame, rather than every replicate separately producing its own
     # parquet file only to be re-read and re-written at collation time.
     _run_params = {
-        "v": _v,
+        "density": density,
+        "nzeroedges": n_zero_edges,
+        "nclasses": n_classes,
+        "doubledclass": doubled_class,
         "seed": _seed,
-        "zeroinit": zero_init,
         "l1scale": _w1,
         "l2scale": _w2,
-        "blipfreq": blip_freq,
-        "blipmode": blip_mode,
         "numepoch": _K,
-        "schedulemode": schedule_mode,
         "replicate": replicate_uid,
     }
     timeseries_path = f"{OUTPUT_DIR}/{kn.pack({**_run_params, 'ext': '.csv'})}"
@@ -1337,10 +1058,11 @@ def run_trial(
 
     # Per-class fraction columns (share of _TRACE_M samples landing exactly
     # on each phenotype): test1_frac..test8_frac are the 8 CLASS_8 classes
-    # in order; train1_frac..train3_frac are the 3 of those 8 that are
-    # also unblipped training patterns (CLASS_8 indices 0, 3, 6 -- S1, S2,
-    # S3), duplicated under their own names for self-documenting clarity
-    # even though train{i}_frac == test{1,4,7}_frac by construction.
+    # in order -- which of these 8 are actually "training" classes depends
+    # on n_classes/train_class_idx (see build_training_set above), so
+    # unlike the v-sweep notebooks there's no separate, fixed-width
+    # train{1..3}_frac duplication here (it would have a different width
+    # for n_classes=3 vs. 5, breaking schema uniformity at collation time).
     _trace_columns = (
         [
             "epoch",
@@ -1348,29 +1070,24 @@ def run_trial(
             "walltime_sec",
             "pure_train_chi2",
             "test_chi2",
-            "blip_train_chi2",
-            "bitflip_chi2",
         ]
         + [f"test{_j + 1}_frac" for _j in range(8)]
-        + [f"train{_j + 1}_frac" for _j in range(3)]
-        + [f"s{_j + 1}_blip_match_frac" for _j in range(3)]
         + [
-            "bitflip_frac",
             "other_frac",
             "other_chi2",
             "other_n_classes",
             "l1_loss",
             "l2_loss",
             "regularization_loss",
-            "v",
+            "density",
+            "n_zero_edges",
+            "n_classes",
+            "doubled_class",
             "seed",
-            "zero_init",
             "l1_scale",
             "l2_scale",
-            "blip_freq",
-            "blip_mode",
             "num_epoch",
-            "schedule_mode",
+            "train_class_idx",
             "replicate_uid",
         ]
     )
@@ -1382,8 +1099,8 @@ def run_trial(
         # configured for this replicate -- while regularization_loss is
         # the actual weighted penalty subtracted from benefit in the
         # fitness function driving evolution.
-        _ptr, _te, _btr, _bfchi2, _cc, _bc, _oc, _noc = _errors_fn(
-            _B_trace[_i], _seed + 2000, _TRACE_M
+        (_ptr, _te, _cc, _oc, _noc,) = compute_errors_edge_masked(
+            _B_trace[_i], _seed + 2000, _TRACE_M, train_idx, train_class_probs
         )
         _l1 = l1_cost(_B_trace[_i])
         _l2 = l2_cost(_B_trace[_i])
@@ -1397,17 +1114,10 @@ def run_trial(
             "walltime_sec": time.time() - _t_evo_start,
             "pure_train_chi2": float(_ptr),
             "test_chi2": float(_te),
-            "blip_train_chi2": float(_btr),
-            "bitflip_chi2": float(_bfchi2),
         }
         for _j in range(8):
             _row[f"test{_j + 1}_frac"] = float(_cc[_j]) / _TRACE_M
-        for _j, _tc in enumerate([0, 3, 6]):
-            _row[f"train{_j + 1}_frac"] = float(_cc[_tc]) / _TRACE_M
-        for _j in range(3):
-            _row[f"s{_j + 1}_blip_match_frac"] = float(_bc[_j]) / _TRACE_M
-        _row["bitflip_frac"] = float(_cc[8]) / _TRACE_M
-        _row["other_frac"] = float(_cc[9]) / _TRACE_M
+        _row["other_frac"] = float(_cc[8]) / _TRACE_M
         _row["other_chi2"] = float(_oc)
         _row["other_n_classes"] = int(_noc)
         _row["l1_loss"] = float(_l1)
@@ -1415,15 +1125,15 @@ def run_trial(
         _row["regularization_loss"] = float(
             _w1 * LAM1 * _l1 + _w2 * LAM2 * _l2
         )
-        _row["v"] = _v
+        _row["density"] = density
+        _row["n_zero_edges"] = n_zero_edges
+        _row["n_classes"] = n_classes
+        _row["doubled_class"] = doubled_class
         _row["seed"] = _seed
-        _row["zero_init"] = zero_init
         _row["l1_scale"] = _w1
         _row["l2_scale"] = _w2
-        _row["blip_freq"] = blip_freq
-        _row["blip_mode"] = blip_mode
         _row["num_epoch"] = _K
-        _row["schedule_mode"] = schedule_mode
+        _row["train_class_idx"] = train_class_idx_str
         _row["replicate_uid"] = replicate_uid
         return _row
 
@@ -1543,7 +1253,7 @@ def run_trial(
         )
         _thread.start()
         try:
-            _G, _B = _run_sswm(
+            _G, _B = run_sswm_edge_masked_scheduled_traced_elastic(
                 _G0,
                 _B0,
                 training_set,
@@ -1553,11 +1263,10 @@ def run_trial(
                 LAM2,
                 _w1,
                 _w2,
-                _mask,
+                edge_mask,
                 _seed,
                 SNAPSHOT_BLOCKS,
                 TIMESERIES_BLOCKS,
-                N_SCORE,
                 _G_snap,
                 _B_snap,
                 _B_trace,
@@ -1582,20 +1291,16 @@ def run_trial(
     (
         pure_train_chi2,
         test_chi2,
-        blip_train_chi2,
-        bitflip_chi2,
         final_class_counts,
-        final_blip_counts,
         final_other_chi2,
         final_n_other_classes,
-    ) = _errors_fn(_B, _seed + 1000, FINAL_M)
+    ) = compute_errors_edge_masked(
+        _B, _seed + 1000, FINAL_M, train_idx, train_class_probs
+    )
     assert final_class_counts.sum() == FINAL_M
     final_l1_loss = l1_cost(_B)
     final_l2_loss = l2_cost(_B)
     final_reg_loss = _w1 * LAM1 * final_l1_loss + _w2 * LAM2 * final_l2_loss
-    s1_blip_match, s2_blip_match, s3_blip_match = (
-        int(_c) for _c in final_blip_counts
-    )
 
     elapsed_sec = time.time() - _t0
 
@@ -1607,66 +1312,50 @@ def run_trial(
             "walltime_sec": np.float32,
             "pure_train_chi2": np.float32,
             "test_chi2": np.float32,
-            "blip_train_chi2": np.float32,
-            "bitflip_chi2": np.float32,
             **{f"test{_j + 1}_frac": np.float32 for _j in range(8)},
-            **{f"train{_j + 1}_frac": np.float32 for _j in range(3)},
-            **{f"s{_j + 1}_blip_match_frac": np.float32 for _j in range(3)},
-            "bitflip_frac": np.float32,
             "other_frac": np.float32,
             "other_chi2": np.float32,
             "other_n_classes": np.uint32,
             "l1_loss": np.float32,
             "l2_loss": np.float32,
             "regularization_loss": np.float32,
-            "v": np.uint8,
+            "density": np.float32,
+            "n_zero_edges": np.uint16,
+            "n_classes": np.uint8,
+            "doubled_class": np.int8,
             "seed": np.uint32,
-            "zero_init": np.bool_,
             "l1_scale": np.float32,
             "l2_scale": np.float32,
-            "blip_freq": np.float32,
             "num_epoch": np.uint32,
         }
     )
-    trace_df["schedule_mode"] = pd.Categorical(trace_df["schedule_mode"])
-    trace_df["blip_mode"] = pd.Categorical(trace_df["blip_mode"])
+    trace_df["train_class_idx"] = pd.Categorical(trace_df["train_class_idx"])
     trace_df["replicate_uid"] = pd.Categorical(trace_df["replicate_uid"])
 
     _final_test_fracs = {
         f"test{_j + 1}_frac": float(final_class_counts[_j] / FINAL_M)
         for _j in range(8)
     }
-    _final_train_fracs = {
-        f"train{_j + 1}_frac": float(final_class_counts[_tc] / FINAL_M)
-        for _j, _tc in enumerate([0, 3, 6])
-    }
 
     result = {
-        "v": _v,
+        "density": density,
+        "n_zero_edges": n_zero_edges,
+        "n_classes": n_classes,
+        "doubled_class": doubled_class,
         "seed": _seed,
         "num_epoch": _K,
-        "zero_init": zero_init,
         "l1_scale": _w1,
         "l2_scale": _w2,
-        "blip_freq": blip_freq,
-        "blip_mode": blip_mode,
-        "schedule_mode": schedule_mode,
+        "train_class_idx": train_class_idx_str,
         "pure_train_chi2": pure_train_chi2,
         "test_chi2": test_chi2,
-        "blip_train_chi2": blip_train_chi2,
-        "bitflip_chi2": bitflip_chi2,
         **_final_test_fracs,
-        **_final_train_fracs,
-        "bitflip_frac": float(final_class_counts[8] / FINAL_M),
-        "other_frac": float(final_class_counts[9] / FINAL_M),
+        "other_frac": float(final_class_counts[8] / FINAL_M),
         "other_chi2": final_other_chi2,
         "other_n_classes": final_n_other_classes,
         "l1_loss": final_l1_loss,
         "l2_loss": final_l2_loss,
         "regularization_loss": final_reg_loss,
-        "s1_blip_match_frac": s1_blip_match / FINAL_M,
-        "s2_blip_match_frac": s2_blip_match / FINAL_M,
-        "s3_blip_match_frac": s3_blip_match / FINAL_M,
         "elapsed_sec": elapsed_sec,
         "replicate_uid": replicate_uid,
         "timeseries_path": timeseries_path,
