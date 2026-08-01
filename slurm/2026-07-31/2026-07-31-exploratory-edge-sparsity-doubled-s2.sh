@@ -14,172 +14,77 @@ echo "JOBNAME ${JOBNAME}"
 JOBPROJECT="$(basename -s .git "$(git remote get-url origin)")"
 echo "JOBPROJECT ${JOBPROJECT}"
 
-NOTEBOOK_NAME="2026-07-23-exploratory"
+NOTEBOOK_NAME="2026-07-30-exploratory-edge-sparsity"
 echo "NOTEBOOK_NAME ${NOTEBOOK_NAME}"
 NOTEBOOK_PATH="bindle/${NOTEBOOK_NAME}.py"
 echo "NOTEBOOK_PATH ${NOTEBOOK_PATH}"
 
-# Reproduces the same (l1_scale=1.0, l2_scale=0.0, schedule_mode in
-# {none, local}, zero_init in {True, False}) condition slice of
-# slurm/2026-07-23/2026-07-23-exploratory-sweep.sh this project has already
-# probed at blip_freq=0.5 (bindle/teeplots/2026-07-25-exploratory-sweep-and
-# -noblip's "blipfreq=0.5+...+l1scale-1.0+l2scale-0.0+schedulemode-
-# {local,none}+zeroinit={True,False}" condition) -- same uneven v/seed
-# split, same fixed L1/L2 mix, "global" schedule_mode dropped as in every
-# recent sibling -- but with changes to the blip mechanism itself:
+# Variant of slurm/2026-07-30/2026-07-30-exploratory-edge-sparsity.sh
+# targeting a narrow follow-up question: with L1 regularization on and
+# the 3-class training set, does presenting ONE of {S1, S2, S3} TWICE as
+# often as the other two skew the evolved population's phenotype
+# distribution to match -- and does that show up as a shift in the
+# double-descent-style curve over model size (n_zero_edges)? This script
+# doubles S2 specifically (--doubled-class 1, i.e. train_idx position 1
+# -- see the notebook's "Training schedule" section, added for this
+# follow-up); slurm/2026-07-31/2026-07-31-exploratory-edge-sparsity-doubled-s1.sh
+# and -doubled-s3.sh are identical except for --doubled-class (0 and 2,
+# doubling S1/S3 respectively).
 #
-#   1. blip_mode is fixed at "fixed" (deterministic single-bit flip per
-#      training pattern, not blip_mode="bitflip"'s random per-replicate
-#      draw), with the 3 flip sites now swept directly via the notebook's
-#      new --blip-sites flag instead of being hardcoded:
-#        - blip_sites = 0,4,8  -- one distinct site per pattern (this is
-#          exactly the notebook's original, pre-existing blip_mode="fixed"
-#          behavior, now reachable as an explicit condition)
-#        - blip_sites = 0,0,0  -- all three patterns blipped at the SAME
-#          site instead of three different ones
-#      (2 conditions -- see bindle/2026-07-23-exploratory.py's
-#      build_schedule cell, "make_blips")
+# Under --doubled-class, TOTAL_BLOCKS=3600 splits [1800, 900, 900]
+# (doubled class : each of the other two) instead of the uniform
+# [1200, 1200, 1200] -- deterministically interleaved (greedy
+# fair-queueing, ties broken toward the lowest class index) so the extra
+# blocks are spread evenly across the run rather than bunched. Critically,
+# pure_train_chi2 is scored against these SAME [0.5, 0.25, 0.25]
+# presentation weights (the notebook's train_class_probs), not a uniform
+# 1/3 -- a population that reproduces the doubled pattern twice as often
+# as the other two is the correct/expected outcome here, not a "biased"
+# one, so the train loss measurement reflects the doubling rather than
+# penalizing it.
 #
-#   2. --blip-release-prob (new notebook flag, swept over 3 values here):
-#      each time a blip is presented, WITH PROBABILITY blip_release_prob
-#      (freshly drawn per blip occurrence, not fixed per replicate) that
-#      occurrence's flip site is "released" from selection against the
-#      blip's fixed (flipped) value -- instead of comparing to the
-#      flipped target, that site is scored against whatever value the
-#      organism ITSELF currently expresses there (see benefit's
-#      release_mask), so it always counts as a match: selection then
-#      actively rewards confidently expressing *some* value at that site
-#      without caring which one, rather than the notebook's default of
-#      rewarding a match to the flipped value. With the complementary
-#      probability, that occurrence is scored normally (exactly the
-#      original notebook's behavior). Three conditions:
-#        - blip_release_prob = 0.0  -- never released: every blip
-#          occurrence scored normally against the flipped value, exactly
-#          the notebook's original (pre-existing) behavior. Included here
-#          as the control arm rather than assumed from a prior sweep.
-#        - blip_release_prob = 1.0  -- always released: every blip
-#          occurrence uses the organism's own expressed value.
-#        - blip_release_prob = 0.5  -- released roughly half the time,
-#          independently drawn per blip occurrence (per K-generation
-#          block, not per generation -- see run_sswm's per-block Bernoulli
-#          draw): some occurrences of a given blip are scored normally,
-#          others are released, within the SAME replicate.
-#      Implemented via a new release_masks array (one mask per
-#      training-set row, giving the release mask to apply IF an
-#      occurrence releases) plus the per-block Bernoulli draw itself,
-#      threaded through benefit()/fitness_output_masked_*_elastic()/
-#      run_sswm_*_elastic(). Backward compatible: blip_release_prob
-#      defaults to 0.0, and the coin-flip draw is skipped entirely
-#      (short-circuited) whenever it's 0.0, reproducing the pre-existing
-#      notebook's behavior bit-for-bit (verified against the prior
-#      notebook revision for a matched seed/condition, aside from
-#      wall-clock timing).
+# Fixed (not swept) for this script, unlike the base edge-sparsity sweep:
+#   - l1_scale=1.0, l2_scale=0.0 ("with L1", pure L1)
+#   - n_classes=3 (this project's original training set {S1, S2, S3})
+#   - doubled_class=0 (S1 doubled)
+# Swept across:
+#   - n_zero_edges in {125, 126, ..., 225} (integers, inclusive)      (101)
+#     -- NOT the base sweep's full [0, 253] range -- density is derived
+#     as density = 1 - n_zero_edges/256 for each n so the notebook's own
+#     --density -> n_zero_edges rounding (round((1-density)*256)) lands
+#     on that exact integer (dividing by 256=2^8 is exact in binary
+#     floating point, so there's no rounding slop to worry about here).
+#   - seed in {1..10}                                                 (10)
+# total = 101 * 10 = 1010 replicates.
 #
-# blip_freq is swept over a new range extending past this project's usual
-# {0.5, 0.6, 0.63, 0.66} values up past 1 -- recall blip_freq is a
-# blip:true pattern-count RATIO (see build_schedule), not a probability, so
-# values above 1 (blips presented MORE often than true patterns) are
-# meaningful:
-#   blip_freq in {0.5, 0.6, 0.75, 1.0, 1.2, 1.5}                        (6)
-# crossed with:
-#   blip_release_prob in {0.0, 1.0, 0.5}                                (3)
-#   blip_sites in {"0,4,8", "0,0,0"}                                    (2)
-#   zero_init in {True, False}                                         (2)
-#   schedule_mode in {none, local}                                     (2)
-#   l1_scale=1.0, l2_scale=0.0 (fixed, not swept)
-#   blip_mode=fixed (fixed, not swept)
-# and the same uneven v/seed split as the base sweep:
-#   v = 0                       -> 1 replicate  (seed 1 only)      (1 v x 1 seed)
-#   v in {2, 4, ..., 20} (even) -> 4 replicates each (seeds 1..4)  (10 v x 4 seed)
-# total = 6 * 3 * 2 * 2 * 2 * (1*1 + 10*4) = 6 * 3 * 2 * 2 * 2 * 41
-#       = 5904 replicates.
+# Generations vs. epochs: same convention as every other sweep in this
+# project -- NUM_EPOCH = round(500e6 / 3600) = 138889, giving 3600 *
+# 138889 = 500,000,400 generations per replicate (~100-120 minutes
+# single-threaded, comfortably inside the 4-hour time limit below).
 #
-# Generations vs. epochs: the notebook's SSWM loop runs
-# TOTAL_BLOCKS (fixed at 3600 inside the notebook, not CLI-configurable)
-# blocks of K generations each, where K is set by the "--num-epoch" CLI
-# flag (the notebook's internal name for this per-block generation count --
-# distinct from the "epoch" column in its output parquet, which is
-# actually the snapshot index, 0..48). To hit a ~500,000,000-generation
-# budget (matching every prior sweep in this project, for comparability):
-# NUM_EPOCH = round(500e6 / 3600) = 138889, giving an actual total of
-# 3600 * 138889 = 500,000,400 generations per replicate (400 over the
-# round-number target -- 3600 does not divide 500e6 evenly).
-#
-# The cluster caps a job array at 1000 queued tasks; at 5904 total
-# replicates this job needs packing well beyond a single naturally-size-2
-# axis to fit. schedule_mode (2) and blip_release_prob (3) are packed
-# together as the FASTEST-varying (innermost) pair of dimensions in the
-# index decomposition below, giving CHUNK = 2 * 3 = 6, so each array
-# task's 6 concurrent replicates are the SAME (zero_init, blip_sites, v,
-# seed, blip_freq) condition run under all 2 schedule_mode x 3
-# blip_release_prob combinations side by side -- this divides 5904
-# replicates evenly into 5904 / 6 = 984 array tasks, comfortably under
-# the cap (and matching this project's other sweeps' array-task count).
-#
-# Global replicate index r in [0, N_TASKS) is split into two contiguous
-# blocks rather than one uniform Cartesian product, since v=0 and the
-# rest of the v values don't share the same seed count. Both blocks
-# decompose fastest-varying first, starting with schedule_idx and
-# release_idx (together) so they align with CHUNK:
-#   - r < N_TASKS_V0: the v=0 block (single seed).
-#     schedule_idx = r % N_SCHEDULE;
-#     release_idx = (r / N_SCHEDULE) % N_RELEASE;
-#     zero_idx = (r / N_SCHEDULE / N_RELEASE) % N_ZERO;
-#     sites_idx = (r / N_SCHEDULE / N_RELEASE / N_ZERO) % N_SITES;
-#     blip_idx = r / N_SCHEDULE / N_RELEASE / N_ZERO / N_SITES.
-#   - r >= N_TASKS_V0: the "rest" block (v in {2,4,...,20}, 4 seeds
-#     each), re-based to r' = r - N_TASKS_V0.
-#     schedule_idx = r' % N_SCHEDULE;
-#     release_idx = (r' / N_SCHEDULE) % N_RELEASE;
-#     zero_idx = (r' / N_SCHEDULE / N_RELEASE) % N_ZERO;
-#     sites_idx = (r' / N_SCHEDULE / N_RELEASE / N_ZERO) % N_SITES;
-#     v_idx = (r' / N_SCHEDULE / N_RELEASE / N_ZERO / N_SITES) % N_V_REST;
-#     seed_idx = (r' / N_SCHEDULE / N_RELEASE / N_ZERO / N_SITES / N_V_REST) % N_REST_SEED;
-#     blip_idx = r' / N_SCHEDULE / N_RELEASE / N_ZERO / N_SITES / N_V_REST / N_REST_SEED.
-# N_TASKS_V0 (144) is itself a multiple of CHUNK=6, so no CHUNK-group
-# straddles the v0/rest block boundary. Array task t owns the CHUNK
-# consecutive indices r = t * CHUNK + j for j in [0, CHUNK) (each
-# launched as a background job).
-#
-# Benchmarked the notebook's core SSWM loop single-threaded (non-cluster
-# hardware) at ~83,000 generations/sec, so one 500M-generation replicate
-# takes ~100 minutes -- comfortably inside the 4-hour job time limit below
-# even allowing for slower cluster CPUs.
-BLIP_FREQS=(0.5 0.6 0.75 1.0 1.2 1.5)
-BLIP_MODE=fixed
-BLIP_RELEASE_PROBS=(0.0 1.0 0.5)
+# The cluster caps a job array at 1000 queued tasks. With only two swept
+# axes here (n_zero_edges, seed) -- unlike the base sweep's four -- the
+# natural CHUNK is N_SEED=10: each array task owns all 10 seeds for ONE
+# n_zero_edges value, running them concurrently (--cpus-per-task=10
+# below matches exactly). This divides 1010 replicates evenly into
+# 1010 / 10 = 101 array tasks (task t IS n_idx t, seed fastest-varying
+# within it), comfortably under the cap with no partial final chunk.
 L1_SCALE=1.0
 L2_SCALE=0.0
-BLIP_SITES=("0,4,8" "0,0,0")
-ZERO_INITS=(True False)
-SCHEDULE_MODES=(none local)
-V0_SEEDS=(1)
-REST_SEEDS=(1 2 3 4)
-V_REST=(2 4 6 8 10 12 14 16 18 20)
-N_BLIP=${#BLIP_FREQS[@]}
-N_RELEASE=${#BLIP_RELEASE_PROBS[@]}
-N_SITES=${#BLIP_SITES[@]}
-N_ZERO=${#ZERO_INITS[@]}
-N_SCHEDULE=${#SCHEDULE_MODES[@]}
-N_V0_SEED=${#V0_SEEDS[@]}
-N_REST_SEED=${#REST_SEEDS[@]}
-N_V_REST=${#V_REST[@]}
-N_TASKS_V0=$((N_SCHEDULE * N_RELEASE * N_ZERO * N_SITES * N_BLIP * N_V0_SEED))
-N_TASKS_REST=$((N_SCHEDULE * N_RELEASE * N_ZERO * N_SITES * N_V_REST * N_REST_SEED * N_BLIP))
-N_TASKS=$((N_TASKS_V0 + N_TASKS_REST))
-CHUNK=$((N_SCHEDULE * N_RELEASE))
+N_CLASSES=3
+DOUBLED_CLASS=1
+DENSITIES=($(awk 'BEGIN { for (n = 125; n <= 225; n++) printf "%.6f ", 1 - n / 256 }'))
+SEEDS=(1 2 3 4 5 6 7 8 9 10)
+N_NZERO=${#DENSITIES[@]}
+N_SEED=${#SEEDS[@]}
+N_TASKS=$((N_NZERO * N_SEED))
+CHUNK=${N_SEED}
 N_ARRAY_TASKS=$(((N_TASKS + CHUNK - 1) / CHUNK))
 NUM_EPOCH=138889
-echo "N_BLIP=${N_BLIP} BLIP_FREQS=${BLIP_FREQS[*]}"
-echo "BLIP_MODE=${BLIP_MODE} (fixed, not swept)"
-echo "N_RELEASE=${N_RELEASE} BLIP_RELEASE_PROBS=${BLIP_RELEASE_PROBS[*]}"
-echo "L1_SCALE=${L1_SCALE} L2_SCALE=${L2_SCALE} (fixed, not swept)"
-echo "N_SITES=${N_SITES} BLIP_SITES=${BLIP_SITES[*]}"
-echo "N_ZERO=${N_ZERO} ZERO_INITS=${ZERO_INITS[*]}"
-echo "N_SCHEDULE=${N_SCHEDULE} SCHEDULE_MODES=${SCHEDULE_MODES[*]}"
-echo "N_V0_SEED=${N_V0_SEED} V0_SEEDS=${V0_SEEDS[*]} (v=0 replicate count)"
-echo "N_REST_SEED=${N_REST_SEED} REST_SEEDS=${REST_SEEDS[*]} N_V_REST=${N_V_REST} V_REST=${V_REST[*]}"
-echo "N_TASKS_V0=${N_TASKS_V0} N_TASKS_REST=${N_TASKS_REST} N_TASKS=${N_TASKS} CHUNK=${CHUNK} N_ARRAY_TASKS=${N_ARRAY_TASKS}"
+echo "L1_SCALE=${L1_SCALE} L2_SCALE=${L2_SCALE} N_CLASSES=${N_CLASSES} DOUBLED_CLASS=${DOUBLED_CLASS} (fixed, not swept)"
+echo "N_NZERO=${N_NZERO} DENSITIES=${DENSITIES[*]}"
+echo "N_SEED=${N_SEED} SEEDS=${SEEDS[*]}"
+echo "N_TASKS=${N_TASKS} CHUNK=${CHUNK} N_ARRAY_TASKS=${N_ARRAY_TASKS}"
 echo "NUM_EPOCH=${NUM_EPOCH} (total generations per replicate = 3600 * NUM_EPOCH = $((3600 * NUM_EPOCH)))"
 
 SOURCE_REVISION="$(git rev-parse HEAD)"
@@ -356,7 +261,7 @@ cat > "${SBATCH_FILE}" << EOF
 #!/bin/bash
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=${CHUNK}
-#SBATCH --mem=16G
+#SBATCH --mem=24G
 #SBATCH --time=4:00:00
 #SBATCH --output="/mnt/home/%u/joblog/%j"
 #SBATCH --mail-user=mawni4ah2o@pomail.net
@@ -378,14 +283,8 @@ echo "notebook source: ${BATCHDIR_JOBSOURCE}/${NOTEBOOK_PATH}"
 cat "${BATCHDIR_JOBSOURCE}/${NOTEBOOK_PATH}" || :
 
 echo "task assignment --------------------------------------------- \${SECONDS}"
-BLIP_FREQS=(${BLIP_FREQS[*]})
-BLIP_RELEASE_PROBS=(${BLIP_RELEASE_PROBS[*]})
-BLIP_SITES=(${BLIP_SITES[*]})
-ZERO_INITS=(${ZERO_INITS[*]})
-SCHEDULE_MODES=(${SCHEDULE_MODES[*]})
-V0_SEEDS=(${V0_SEEDS[*]})
-REST_SEEDS=(${REST_SEEDS[*]})
-V_REST=(${V_REST[*]})
+DENSITIES=(${DENSITIES[*]})
+SEEDS=(${SEEDS[*]})
 TASK_ID=\${SLURM_ARRAY_TASK_ID:-0}
 echo "TASK_ID=\${TASK_ID} CHUNK=${CHUNK}"
 echo "owns global replicate indices \$((TASK_ID * ${CHUNK})) .. \$((TASK_ID * ${CHUNK} + ${CHUNK} - 1))"
@@ -398,57 +297,20 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-# Run one (zero_init, blip_sites, v, seed, blip_freq, schedule_mode,
-# blip_release_prob) trial on CPU, with l1_scale=${L1_SCALE},
-# l2_scale=${L2_SCALE}, blip_mode=${BLIP_MODE} held fixed (reproducing the
-# specific condition this job targets rather than sweeping them). Each
-# replicate runs in its own working dir \${JOBDIR}/r<gid> and the notebook
-# writes one timeseries csv plus G/B snapshot npz stores to that dir's
+# Run one (n_zero_edges, seed) trial on CPU -- l1_scale=${L1_SCALE},
+# l2_scale=${L2_SCALE}, n_classes=${N_CLASSES}, doubled_class=${DOUBLED_CLASS}
+# are fixed for every replicate in this script. Each replicate runs in
+# its own working dir \${JOBDIR}/r<gid> and the notebook writes one
+# timeseries csv plus G/B snapshot npz stores to that dir's
 # dd_trial_outputs/, self-describing via keyname (every run option as a
 # key=value segment) with a uuid replicate identifier stamped on every
 # timeseries row.
 run_replicate() {
     local gid="\$1"
-    local v seed
-
-    if [ "\${gid}" -lt "${N_TASKS_V0}" ]; then
-        # v=0 block: single seed, so no v/seed indexing needed.
-        local schedule_idx=\$((gid % ${N_SCHEDULE}))
-        local rem1=\$((gid / ${N_SCHEDULE}))
-        local release_idx=\$((rem1 % ${N_RELEASE}))
-        local rem2=\$((rem1 / ${N_RELEASE}))
-        local zero_idx=\$((rem2 % ${N_ZERO}))
-        local rem3=\$((rem2 / ${N_ZERO}))
-        local sites_idx=\$((rem3 % ${N_SITES}))
-        local rem4=\$((rem3 / ${N_SITES}))
-        local blip_idx=\$((rem4 % ${N_BLIP}))
-        v=0
-        seed="\${V0_SEEDS[0]}"
-    else
-        # "rest" block (v in {2,4,...,20}), re-based to start at 0.
-        local rgid=\$((gid - ${N_TASKS_V0}))
-        local schedule_idx=\$((rgid % ${N_SCHEDULE}))
-        local rem1=\$((rgid / ${N_SCHEDULE}))
-        local release_idx=\$((rem1 % ${N_RELEASE}))
-        local rem2=\$((rem1 / ${N_RELEASE}))
-        local zero_idx=\$((rem2 % ${N_ZERO}))
-        local rem3=\$((rem2 / ${N_ZERO}))
-        local sites_idx=\$((rem3 % ${N_SITES}))
-        local rem4=\$((rem3 / ${N_SITES}))
-        local v_idx=\$((rem4 % ${N_V_REST}))
-        local rem5=\$((rem4 / ${N_V_REST}))
-        local seed_idx=\$((rem5 % ${N_REST_SEED}))
-        local rem6=\$((rem5 / ${N_REST_SEED}))
-        local blip_idx=\$((rem6 % ${N_BLIP}))
-        v="\${V_REST[\${v_idx}]}"
-        seed="\${REST_SEEDS[\${seed_idx}]}"
-    fi
-
-    local zeroinit="\${ZERO_INITS[\${zero_idx}]}"
-    local sites="\${BLIP_SITES[\${sites_idx}]}"
-    local schedulemode="\${SCHEDULE_MODES[\${schedule_idx}]}"
-    local blipfreq="\${BLIP_FREQS[\${blip_idx}]}"
-    local releaseprob="\${BLIP_RELEASE_PROBS[\${release_idx}]}"
+    local seed_idx=\$((gid % ${N_SEED}))
+    local n_idx=\$((gid / ${N_SEED}))
+    local density="\${DENSITIES[\${n_idx}]}"
+    local seed="\${SEEDS[\${seed_idx}]}"
     local repdir="\${JOBDIR}/r\${gid}"
     mkdir -p "\${repdir}"
     cd "\${repdir}"
@@ -466,22 +328,18 @@ run_replicate() {
     local nbdir="\${repdir}/_nb"
     mkdir -p "\${nbdir}"
     cp "${BATCHDIR_JOBSOURCE}/${NOTEBOOK_PATH}" "\${nbdir}/${NOTEBOOK_NAME}.py"
-    echo "  [gid=\${gid}] blip_freq=\${blipfreq} blip_mode=${BLIP_MODE} blip_sites=\${sites} blip_release_prob=\${releaseprob} seed=\${seed} l1=${L1_SCALE} l2=${L2_SCALE} v=\${v} zero_init=\${zeroinit} schedule_mode=\${schedulemode} repdir=\${repdir}"
+    echo "  [gid=\${gid}] density=\${density} seed=\${seed} repdir=\${repdir}"
     python3.10 -m marimo export ipynb \
         --include-outputs --sort topological -f \
         "\${nbdir}/${NOTEBOOK_NAME}.py" \
         -o "\${repdir}/${NOTEBOOK_NAME}.ipynb" \
         -- \
         --seed "\${seed}" \
-        --v "\${v}" \
-        --zero-init "\${zeroinit}" \
+        --density "\${density}" \
         --l1-scale ${L1_SCALE} \
         --l2-scale ${L2_SCALE} \
-        --blip-freq "\${blipfreq}" \
-        --blip-mode ${BLIP_MODE} \
-        --blip-sites "\${sites}" \
-        --blip-release-prob "\${releaseprob}" \
-        --schedule-mode "\${schedulemode}" \
+        --n-classes ${N_CLASSES} \
+        --doubled-class ${DOUBLED_CLASS} \
         --num-epoch ${NUM_EPOCH}
 
     # Fail loudly on a blank/failed export. marimo can exit 0 while
@@ -597,18 +455,17 @@ pushd "${BATCHDIR}/.."
 popd
 
 echo "   - join per-replicate timeseries csvs across all conditions, as parquet"
-# Each replicate writes one self-describing timeseries csv (v, seed,
-# zeroinit, l1scale, l2scale, blipfreq, blipmode, blipsites, bliprelprob,
-# numepoch, replicate columns stamped by the notebook's run cell) under
+# Each replicate writes one self-describing timeseries csv (density,
+# nzeroedges, nclasses, doubledclass, seed, l1scale, l2scale, numepoch,
+# replicate columns stamped by the notebook's run cell) under
 # r<gid>/dd_trial_outputs/, so a straight concatenation yields a collated
-# frame spanning the whole sweep.
-# Per-replicate output is CSV (written progressively during the run, so a
-# SLURM timeout still leaves partial data on disk) rather than parquet;
-# joinem infers CSV input / parquet output from the file extensions below,
-# so the conversion to parquet happens once here rather than once per
-# replicate. The G/B snapshot npz stores are NOT tabular (they're keyed
-# arrays), so they aren't joined here -- they ride along in the jobarchive
-# tarball above instead.
+# frame spanning the whole sweep. Per-replicate output is CSV (written
+# progressively during the run, so a SLURM timeout still leaves partial
+# data on disk) rather than parquet; joinem infers CSV input / parquet
+# output from the file extensions below, so the conversion to parquet
+# happens once here rather than once per replicate. The G/B snapshot npz
+# stores are NOT tabular (they're keyed arrays), so they aren't joined
+# here -- they ride along in the jobarchive tarball above instead.
 out_path="${BATCHDIR_JOBRESULT}/a=trace+date=${JOBDATE}+job=${JOBNAME}+ext=.pqt"
 ls -1 "${BATCHDIR}"/__*/**/dd_trial_outputs/*ext=.csv 2>/dev/null \
     | tee /dev/stderr \
