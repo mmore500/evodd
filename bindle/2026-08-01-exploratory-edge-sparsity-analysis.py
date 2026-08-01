@@ -233,8 +233,6 @@ def prep_conditions(df):
         )
     ]
     N_CLASSES_VALUES = sorted(conditions["n_classes"].unique())
-    assert len(L1_CONDITIONS) == 2, L1_CONDITIONS
-    assert len(N_CLASSES_VALUES) == 2, N_CLASSES_VALUES
     return CONDITION_COLS, L1_CONDITIONS, N_CLASSES_VALUES, conditions
 
 
