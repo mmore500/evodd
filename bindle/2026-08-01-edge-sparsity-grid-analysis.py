@@ -6,23 +6,25 @@ app = marimo.App(width="full")
 
 @app.cell
 def import_std():
+    import colorsys
     import pathlib
     import tempfile
     import urllib.request
 
-    return pathlib, tempfile, urllib
+    return colorsys, pathlib, tempfile, urllib
 
 
 @app.cell
 def import_pkg():
     import marimo as mo
     from matplotlib.colors import SymLogNorm
+    from matplotlib.gridspec import GridSpec
     import matplotlib.pyplot as plt
     import pandas as pd
     from teeplot import teeplot as tp
     from watermark import watermark
 
-    return SymLogNorm, mo, pd, plt, tp, watermark
+    return GridSpec, SymLogNorm, mo, pd, plt, tp, watermark
 
 
 @app.cell(hide_code=True)
@@ -71,6 +73,14 @@ def delimit_intro(mo):
        independent-L1/L2 grids not yet backed by a committed slurm
        script), so it's included here as its own panel rather than only
        inferred from the chi^2 plots.
+    4. Final phenotype composition (stacked fraction of each of the 8
+       canonical `CLASS_8` phenotypes, plus "other") vs. `n_zero_edges`,
+       as a facet grid -- one small stackplot panel per (`l1_scale`,
+       `l2_scale`) grid cell (63 panels: 9 `l1_scale` columns x 7
+       `l2_scale` rows) -- rather than the single-`n_zero_edges`-axis
+       layout used for plots 1-3, since here both regularization axes
+       are swept independently with no natural "off" baseline to
+       collapse into a 2x2-style condition grid.
 
     Unlike this project's other edge-sparsity analysis notebooks, L1 and
     L2 here are swept INDEPENDENTLY (`l1_scale` in 9 values from 0.0001
@@ -446,6 +456,205 @@ def render_classified_heatmap(
         teeplot_outattrs={
             "dataset": "edge-sparsity-grid",
             "metric": "classified",
+        },
+        teeplot_subdir=pathlib.Path(__file__).stem,
+        teeplot_show=False,
+    ) as _fig:
+        pass
+    mo.output.append(_fig)
+    plt.close(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def delimit_composition_facet(mo):
+    mo.md("""
+    ## Plot 4: phenotype composition facet grid (n_zero_edges x l1_scale x l2_scale)
+
+    A facet grid of small stackplots: x-axis = `n_zero_edges` (the same
+    5 swept values as plots 1-3), column = `l1_scale` (9 values),
+    row = `l2_scale` (7 values) -- 63 panels total. Each panel stacks
+    the median (across the 3 replicate seeds) final fraction of each of
+    the 8 canonical `CLASS_8` phenotypes (`test1_frac`..`test8_frac`)
+    plus "other" (`other_frac`). `n_classes=3` is fixed dataset-wide
+    (see "Verify the fixed condition" above), so the train/test-only
+    split -- and therefore the legend -- is the same in every panel:
+    classes 1/4/7 (`{S1, S2, S3}`) are drawn at full saturation as
+    "train", the remaining 5 classes are desaturated/lightened via
+    `dull()` as "test-only", and "other" is white with a black outline
+    -- same convention as this project's other composition stackplots
+    (see `bindle/2026-07-31-exploratory-edge-sparsity-analysis.py`).
+    """)
+    return
+
+
+@app.cell
+def composition_plot_helpers(colorsys):
+    def dull(hex_color, sat_scale=0.35, light_boost=0.25):
+        # desaturates + lightens a bright hex color -- used to visually
+        # recede "test-only" phenotype classes (never in the training
+        # set) behind the full-saturation "train" classes in the same
+        # stackplot.
+        r, g, b = (int(hex_color[i : i + 2], 16) / 255 for i in (1, 3, 5))
+        hue, lightness, sat = colorsys.rgb_to_hls(r, g, b)
+        lightness = min(1.0, lightness + light_boost)
+        sat = sat * sat_scale
+        return colorsys.hls_to_rgb(hue, lightness, sat)
+
+    CLASS_COLORS = [
+        "#e6194B",
+        "#3cb44b",
+        "#4363d8",
+        "#f58231",
+        "#911eb4",
+        "#46f0f0",
+        "#f032e6",
+        "#bcf60c",
+    ]
+    OTHER_COLOR = "#ffffff"
+    return CLASS_COLORS, OTHER_COLOR, dull
+
+
+@app.cell
+def composition_facet_grid_fn(CLASS_COLORS, GridSpec, OTHER_COLOR, dull, plt):
+    def make_composition_facet_grid(df, n_zero_values, l1_values, l2_values):
+        FRAC_COLS = [f"test{j}_frac" for j in range(1, 9)]
+
+        final = (
+            df.sort_values("generation")
+            .groupby(
+                ["n_zero_edges", "l1_scale", "l2_scale", "seed"],
+                observed=True,
+            )
+            .tail(1)
+        )
+        agg = (
+            final.groupby(
+                ["n_zero_edges", "l1_scale", "l2_scale"], observed=True
+            )[FRAC_COLS + ["other_frac"]]
+            .median()
+            .reset_index()
+        )
+
+        train_idx_0based = sorted(
+            int(i) for i in df["train_class_idx"].iloc[0].split(",")
+        )
+        train_idx = [i + 1 for i in train_idx_0based]
+        test_only_idx = [i for i in range(1, 9) if i not in train_idx]
+        labels = (
+            [f"train (test{i})" for i in train_idx]
+            + [f"test-only (test{i})" for i in test_only_idx]
+            + ["other"]
+        )
+        colors = (
+            [CLASS_COLORS[i - 1] for i in train_idx]
+            + [dull(CLASS_COLORS[i - 1]) for i in test_only_idx]
+            + [OTHER_COLOR]
+        )
+
+        n_rows, n_cols = len(l2_values), len(l1_values)
+        fig = plt.figure(figsize=(1.7 * n_cols, 1.4 * n_rows), dpi=90)
+        gs = GridSpec(n_rows, n_cols, figure=fig, hspace=0.15, wspace=0.15)
+
+        ax0 = None
+        legend_handles = None
+        for row, l2s in enumerate(l2_values):
+            for col, l1s in enumerate(l1_values):
+                if ax0 is None:
+                    ax = fig.add_subplot(gs[row, col])
+                    ax0 = ax
+                else:
+                    ax = fig.add_subplot(gs[row, col], sharex=ax0, sharey=ax0)
+
+                cell = (
+                    agg[(agg["l1_scale"] == l1s) & (agg["l2_scale"] == l2s)]
+                    .set_index("n_zero_edges")
+                    .reindex(n_zero_values)
+                )
+                stack = (
+                    [cell[f"test{i}_frac"] for i in train_idx]
+                    + [cell[f"test{i}_frac"] for i in test_only_idx]
+                    + [cell["other_frac"]]
+                )
+                polys = ax.stackplot(
+                    n_zero_values, *stack, colors=colors, labels=labels
+                )
+                polys[-1].set_edgecolor("black")
+                polys[-1].set_linewidth(0.4)
+                legend_handles = polys
+
+                ax.set_xlim(min(n_zero_values), max(n_zero_values))
+                ax.set_ylim(0, 1)
+                ax.set_yticks([0, 0.5, 1])
+                ax.tick_params(labelsize=5)
+                if row == 0:
+                    ax.set_title(f"l1={l1s:g}", fontsize=6)
+                if col == n_cols - 1:
+                    ax.yaxis.set_label_position("right")
+                    ax.set_ylabel(
+                        f"l2={l2s:g}",
+                        fontsize=6,
+                        rotation=0,
+                        labelpad=22,
+                        va="center",
+                    )
+                if row == n_rows - 1:
+                    ax.set_xticks(n_zero_values)
+                    ax.set_xticklabels(
+                        [str(v) for v in n_zero_values],
+                        rotation=90,
+                        fontsize=5,
+                    )
+                else:
+                    ax.tick_params(labelbottom=False)
+                if col != 0:
+                    ax.tick_params(labelleft=False)
+
+        fig.legend(
+            handles=legend_handles,
+            loc="center left",
+            bbox_to_anchor=(1.005, 0.5),
+            fontsize=8,
+            frameon=False,
+            handlelength=1.2,
+        )
+        fig.supxlabel(
+            "n_zero_edges (of 256 possible) -- col = l1_scale, "
+            "row = l2_scale",
+            fontsize=10,
+        )
+        fig.supylabel("final phenotype fraction", fontsize=10)
+        fig.suptitle(
+            "edge-sparsity L1xL2 grid: final phenotype composition "
+            "facet (x=n_zero_edges, col=l1_scale, row=l2_scale)",
+            fontsize=13,
+        )
+        return fig
+
+    return (make_composition_facet_grid,)
+
+
+@app.cell
+def render_composition_facet_grid(
+    df,
+    l1_values,
+    l2_values,
+    make_composition_facet_grid,
+    mo,
+    n_zero_values,
+    pathlib,
+    plt,
+    tp,
+):
+    with tp.teed(
+        make_composition_facet_grid,
+        df,
+        n_zero_values,
+        l1_values,
+        l2_values,
+        teeplot_outattrs={
+            "dataset": "edge-sparsity-grid",
+            "viz": "composition-facet",
         },
         teeplot_subdir=pathlib.Path(__file__).stem,
         teeplot_show=False,
