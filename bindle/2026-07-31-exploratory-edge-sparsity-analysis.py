@@ -6,11 +6,12 @@ app = marimo.App(width="full")
 
 @app.cell
 def import_std():
+    import colorsys
     import pathlib
     import tempfile
     import urllib.request
 
-    return pathlib, tempfile, urllib
+    return colorsys, pathlib, tempfile, urllib
 
 
 @app.cell
@@ -80,6 +81,9 @@ def delimit_intro(mo):
        per swept `n_zero_edges` value, colored by a continuous colormap.
     3. Training (actual) chi^2 error over evolutionary time, same layout
        as (2).
+    4. Final phenotype composition (stacked fraction of each of the 8
+       canonical `CLASS_8` phenotypes, plus "other") vs. `n_zero_edges`,
+       across the full swept range.
 
     Every chi^2 y-axis here is symlog -- linear below 1.0, log above --
     matching this project's usual convention (`CHI2_LINTHRESH = 1.0`).
@@ -91,7 +95,7 @@ def delimit_intro(mo):
     itself the swept model-size axis (no blips, no `v`, no `zero_init`,
     no `schedule_mode` -- see `bindle/2026-07-30-exploratory-edge-sparsity.py`),
     all 4 conditions fit as subplots in a single figure per plot type,
-    so each of the 3 figures is produced exactly once.
+    so each of the 4 figures is produced exactly once.
     """
     )
     return
@@ -562,6 +566,192 @@ def render_train_loss_over_time(
         teeplot_outattrs={
             "dataset": "exploratory-edge-sparsity",
             "metric": "train",
+        },
+        teeplot_subdir=pathlib.Path(__file__).stem,
+        teeplot_show=False,
+    ) as _fig:
+        pass
+    mo.output.append(_fig)
+    plt.close(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def delimit_composition_plot(mo):
+    mo.md(
+        """
+    ## Plot 4: phenotype composition vs. n_zero_edges
+
+    For each condition, stacks the final (each replicate's own
+    last-recorded-generation row) median fraction of each of the 8
+    canonical `CLASS_8` phenotypes (`test1_frac`..`test8_frac`) plus
+    "other" (`other_frac`, anything not matching one of the 8) against
+    the full swept `n_zero_edges` range. Classes actually in that
+    condition's training set (`train_class_idx`; 3-class -> `{S1, S2,
+    S3}` = classes 1/4/7, 5-class adds classes 2/8) are drawn at full
+    saturation; classes present only in the *testing* trace (never
+    trained on) are desaturated/lightened via `dull()`, and "other" is
+    white with a black outline -- same convention used throughout this
+    project's stackplot figures. Colors are assigned per fixed class
+    number (`CLASS_COLORS[class_idx - 1]`) rather than by train/test
+    position, so they stay correct regardless of how many classes a
+    given condition trains on.
+    """
+    )
+    return
+
+
+@app.cell
+def plot_helpers(colorsys):
+    def dull(hex_color, sat_scale=0.35, light_boost=0.25):
+        # desaturates + lightens a bright hex color -- used to visually
+        # recede "test-only" phenotype classes (never in the training
+        # set) behind the full-saturation "train" classes in the same
+        # stackplot.
+        r, g, b = (int(hex_color[i : i + 2], 16) / 255 for i in (1, 3, 5))
+        hue, lightness, sat = colorsys.rgb_to_hls(r, g, b)
+        lightness = min(1.0, lightness + light_boost)
+        sat = sat * sat_scale
+        return colorsys.hls_to_rgb(hue, lightness, sat)
+
+    CLASS_COLORS = [
+        "#e6194B",
+        "#3cb44b",
+        "#4363d8",
+        "#f58231",
+        "#911eb4",
+        "#46f0f0",
+        "#f032e6",
+        "#bcf60c",
+    ]
+    OTHER_COLOR = "#ffffff"
+    return CLASS_COLORS, OTHER_COLOR, dull
+
+
+@app.cell
+def composition_stackplot_fn(CLASS_COLORS, GridSpec, OTHER_COLOR, dull, plt):
+    def make_composition_stackplot(df, l1_conditions, n_classes_values):
+        FRAC_COLS = [f"test{j}_frac" for j in range(1, 9)]
+
+        final = (
+            df.sort_values("generation")
+            .groupby(
+                [
+                    "l1_scale",
+                    "l2_scale",
+                    "n_classes",
+                    "n_zero_edges",
+                    "seed",
+                ],
+                observed=True,
+            )
+            .tail(1)
+        )
+
+        fig = plt.figure(figsize=(14, 8), dpi=80)
+        gs = GridSpec(
+            len(l1_conditions),
+            len(n_classes_values),
+            figure=fig,
+            hspace=0.35,
+            wspace=0.6,
+        )
+
+        ax0 = None
+        for row, (l1s, l2s, l1_label) in enumerate(l1_conditions):
+            for col, ncls in enumerate(n_classes_values):
+                if ax0 is None:
+                    ax = fig.add_subplot(gs[row, col])
+                    ax0 = ax
+                else:
+                    ax = fig.add_subplot(gs[row, col], sharex=ax0, sharey=ax0)
+
+                sub = final[
+                    (final["l1_scale"] == l1s)
+                    & (final["l2_scale"] == l2s)
+                    & (final["n_classes"] == ncls)
+                ]
+                n_values = sorted(sub["n_zero_edges"].unique())
+                agg = (
+                    sub.groupby("n_zero_edges", observed=True)[
+                        FRAC_COLS + ["other_frac"]
+                    ]
+                    .median()
+                    .reindex(n_values)
+                )
+
+                train_idx_0based = sorted(
+                    int(i) for i in sub["train_class_idx"].iloc[0].split(",")
+                )
+                train_idx = [i + 1 for i in train_idx_0based]
+                test_only_idx = [i for i in range(1, 9) if i not in train_idx]
+
+                stack = (
+                    [agg[f"test{i}_frac"] for i in train_idx]
+                    + [agg[f"test{i}_frac"] for i in test_only_idx]
+                    + [agg["other_frac"]]
+                )
+                colors = (
+                    [CLASS_COLORS[i - 1] for i in train_idx]
+                    + [dull(CLASS_COLORS[i - 1]) for i in test_only_idx]
+                    + [OTHER_COLOR]
+                )
+                labels = (
+                    [f"train (test{i})" for i in train_idx]
+                    + [f"test-only (test{i})" for i in test_only_idx]
+                    + ["other"]
+                )
+
+                polys = ax.stackplot(
+                    n_values, *stack, colors=colors, labels=labels
+                )
+                polys[-1].set_edgecolor("black")
+                polys[-1].set_linewidth(0.6)
+                if n_values:
+                    ax.set_xlim(min(n_values), max(n_values))
+                ax.set_ylim(0, 1)
+                ax.set_title(f"{l1_label}, n_classes={ncls}", fontsize=10)
+                if row == len(l1_conditions) - 1:
+                    ax.set_xlabel("n_zero_edges (of 256 possible)")
+                if col == 0:
+                    ax.set_ylabel("final phenotype fraction")
+                if row == 0:
+                    ax.legend(
+                        loc="upper left",
+                        bbox_to_anchor=(1.02, 1.0),
+                        fontsize=7,
+                        frameon=False,
+                        handlelength=1.2,
+                    )
+
+        fig.suptitle(
+            "final phenotype composition vs. n_zero_edges",
+            fontsize=12,
+        )
+        return fig
+
+    return (make_composition_stackplot,)
+
+
+@app.cell
+def render_composition_stackplot(
+    L1_CONDITIONS,
+    N_CLASSES_VALUES,
+    df,
+    make_composition_stackplot,
+    mo,
+    pathlib,
+    plt,
+    tp,
+):
+    with tp.teed(
+        make_composition_stackplot,
+        df,
+        L1_CONDITIONS,
+        N_CLASSES_VALUES,
+        teeplot_outattrs={
+            "dataset": "exploratory-edge-sparsity",
+            "viz": "composition-stackplot",
         },
         teeplot_subdir=pathlib.Path(__file__).stem,
         teeplot_show=False,
