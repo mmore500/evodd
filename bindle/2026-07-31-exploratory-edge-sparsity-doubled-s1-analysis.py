@@ -15,8 +15,8 @@ def import_std():
 
 @app.cell
 def import_pkg():
-    from matplotlib.colors import Normalize
     import marimo as mo
+    from matplotlib.colors import Normalize
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator, ScalarFormatter
     import numpy as np

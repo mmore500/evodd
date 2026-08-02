@@ -15,9 +15,9 @@ def import_std():
 
 @app.cell
 def import_pkg():
+    import marimo as mo
     from matplotlib.colors import Normalize
     from matplotlib.gridspec import GridSpec
-    import marimo as mo
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator, ScalarFormatter
     import numpy as np
